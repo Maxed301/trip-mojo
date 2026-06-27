@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated dose/debug artifacts
+p101_mojo_*
+p101_*debug*.json
+p101_compare_trip_latest.json
+p101_trip4d_basics.json
+p101_wet_residual_debug.json
+p101_h2o_*.npy
+tmp_mojo_*
+tmp_trip_*
+tmp_p101_*.exec
