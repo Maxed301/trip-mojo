@@ -1,7 +1,7 @@
 [project]
 name = "trip-mojo"
 version = "0.1.0"
-description = "Add your description here"
+description = "Portable Mojo backend for the TRiP FDCB optimizer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

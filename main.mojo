@@ -1,4 +1,8 @@
-from exec_parser import parse_exec_file, print_exec_plan_summary
+from exec_parser import (
+    parse_exec_file,
+    print_exec_plan_summary,
+    require_standalone_setup_only,
+)
 from case_model import load_native_case, native_case_from_exec
 from energy_layers import build_energy_layers
 from field_activation import build_native_optimization_field_state, native_field_mark_mask
@@ -20,6 +24,7 @@ def exec_path_from_args() -> String:
 def main() raises:
     var plan = parse_exec_file(exec_path_from_args())
     print_exec_plan_summary(plan)
+    require_standalone_setup_only(plan)
     var native_case = native_case_from_exec(plan)
     var loaded = load_native_case(native_case)
     var sis = read_sis_table(native_case.sis_path)

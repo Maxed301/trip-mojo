@@ -19,3 +19,6 @@ p101_h2o_*.npy
 tmp_mojo_*
 tmp_trip_*
 tmp_p101_*.exec
+perf.data*
+*.profraw
+*.profdata

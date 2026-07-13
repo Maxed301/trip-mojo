@@ -11,6 +11,10 @@ struct VOICommand(Copyable, Movable):
     var tissue: String
     var weight_factor: Float64
     var max_dose_fraction: Float64
+    var bin_state: String
+    var argument0: Float64
+    var argument1: Float64
+    var use: Bool
 
 
 @fieldwise_init
@@ -50,6 +54,9 @@ struct OptimizationSpec(Copyable, Movable):
     var no_preopt: Bool
     var no_dose_weight: Bool
     var complex_min_particles: Bool
+    var selected_fields: String
+    var ct_based: Bool
+    var maximum_dose_weight: Float64
 
 
 @fieldwise_init
@@ -64,6 +71,17 @@ struct DoseCalcSpec(Copyable, Movable):
     var direct: Bool
     var voi: String
     var max_threads: Int
+    var no_svv: Bool
+    var no_rbe: Bool
+
+
+@fieldwise_init
+struct DVHSpec(Copyable, Movable):
+    var enabled: Bool
+    var output_base: String
+    var biological: Bool
+    var exchange_format: String
+    var write: Bool
 
 
 @fieldwise_init
@@ -77,6 +95,9 @@ struct ExecPlan(Copyable, Movable):
     var scancap_scanner_x_mm: Float64
     var scancap_scanner_y_mm: Float64
     var scancap_min_particles: Float64
+    var scancap_couch_degrees: Float64
+    var scancap_gantry_degrees: Float64
+    var scancap_rifi_index: Int
     var sis_path: String
     var hlut_path: String
     var ddd_path_pattern: String
@@ -85,6 +106,7 @@ struct ExecPlan(Copyable, Movable):
     var rbe_tables: List[RBERead]
     var ct_base_path: String
     var voi_base_path: String
+    var voi_read_selection: String
     var voi_commands: List[VOICommand]
     var prescription_dose_gy: Float64
     var target_tissue: String
@@ -95,6 +117,9 @@ struct ExecPlan(Copyable, Movable):
     var has_dose_calc: Bool
     var dose_calc: DoseCalcSpec
     var dose_output_base: String
+    var has_dvh: Bool
+    var dvh: DVHSpec
+    var quit_requested: Bool
 
 
 def parse_exec_file(path: String) raises -> ExecPlan:
@@ -160,12 +185,16 @@ def empty_exec_plan(path: String) -> ExecPlan:
         0.0,
         0.0,
         0.0,
+        0.0,
+        0.0,
+        0,
         "",
         "",
         "",
         "",
         "",
         List[RBERead](),
+        "",
         "",
         "",
         List[VOICommand](),
@@ -178,6 +207,9 @@ def empty_exec_plan(path: String) -> ExecPlan:
         False,
         empty_dose_calc_spec(),
         "",
+        False,
+        empty_dvh_spec(),
+        False,
     )
 
 
@@ -186,11 +218,15 @@ def empty_field_spec(number: Int) -> FieldSpec:
 
 
 def empty_optimization_spec() -> OptimizationSpec:
-    return OptimizationSpec(False, False, "", "", "", "", 0, 0, 0.0, 0.0, 0.0, 0.0, 0, "", 0.0, False, False, False)
+    return OptimizationSpec(False, False, "", "", "", "", 0, 0, 0.0, 0.0, 0.0, 0.0, 0, "", 0.0, False, False, False, "", False, 0.0)
 
 
 def empty_dose_calc_spec() -> DoseCalcSpec:
-    return DoseCalcSpec(False, "", "", False, "", False, "", False, "", 0)
+    return DoseCalcSpec(False, "", "", False, "", False, "", False, "", 0, False, False)
+
+
+def empty_dvh_spec() -> DVHSpec:
+    return DVHSpec(False, "", False, "", False)
 
 
 def parse_exec_line(mut plan: ExecPlan, line: String, include_file: Bool) raises:
@@ -199,10 +235,12 @@ def parse_exec_line(mut plan: ExecPlan, line: String, include_file: Bool) raises
         return
     var command = first_token(trimmed)
     if command == "exec":
+        validate_line_syntax(trimmed, ["exec"], List[String]())
         var include_path = first_quoted(trimmed)
         plan.includes.append(include_path)
         return
     if command == "scancap":
+        validate_line_syntax(trimmed, ["scancap"], ["bolus", "offh2o", "x", "y", "scannerx", "scannery", "minparticles", "couch", "gantry", "rifi"])
         var parsed_bolus = option_float(trimmed, "bolus", plan.scancap_bolus_mm_h2o)
         if not include_file or plan.scancap_bolus_mm_h2o == 0.0:
             plan.scancap_bolus_mm_h2o = parsed_bolus
@@ -212,34 +250,42 @@ def parse_exec_line(mut plan: ExecPlan, line: String, include_file: Bool) raises
         plan.scancap_scanner_x_mm = option_float(trimmed, "scannerx", plan.scancap_scanner_x_mm)
         plan.scancap_scanner_y_mm = option_float(trimmed, "scannery", plan.scancap_scanner_y_mm)
         plan.scancap_min_particles = option_float(trimmed, "minparticles", plan.scancap_min_particles)
+        plan.scancap_couch_degrees = option_float(trimmed, "couch", plan.scancap_couch_degrees)
+        plan.scancap_gantry_degrees = option_float(trimmed, "gantry", plan.scancap_gantry_degrees)
+        plan.scancap_rifi_index = option_int(trimmed, "rifi", plan.scancap_rifi_index)
         return
     if command == "hlut":
+        validate_line_syntax(trimmed, ["hlut", "read"], List[String]())
         plan.hlut_path = first_quoted(trimmed)
         return
     if command == "ddd":
+        validate_line_syntax(trimmed, ["ddd", "read"], List[String]())
         plan.ddd_path_pattern = first_quoted(trimmed)
         return
     if command == "spc":
+        validate_line_syntax(trimmed, ["spc", "read"], List[String]())
         plan.spc_path_pattern = first_quoted(trimmed)
         return
     if command == "dedx":
+        validate_line_syntax(trimmed, ["dedx", "read"], List[String]())
         plan.dedx_path = first_quoted(trimmed)
         return
     if command == "sis":
+        validate_line_syntax(trimmed, ["sis", "read"], List[String]())
         plan.sis_path = first_quoted(trimmed)
-        return
-    if include_file and command == "rifi":
         return
     if command == "rbe":
         parse_rbe_line(plan, trimmed)
         return
     if command == "ct":
+        validate_line_syntax(trimmed, ["ct", "read"], List[String]())
         plan.ct_base_path = first_quoted(trimmed)
         return
     if command == "voi":
         parse_voi_line(plan, trimmed)
         return
     if command == "plan":
+        validate_line_syntax(trimmed, ["plan"], ["dose", "targettissue", "residualtissue"])
         plan.prescription_dose_gy = option_float(trimmed, "dose", plan.prescription_dose_gy)
         plan.target_tissue = option_string(trimmed, "targettissue", plan.target_tissue)
         plan.residual_tissue = option_string(trimmed, "residualtissue", plan.residual_tissue)
@@ -253,39 +299,55 @@ def parse_exec_line(mut plan: ExecPlan, line: String, include_file: Bool) raises
     if command == "dose":
         parse_dose_line(plan, trimmed)
         return
-    if command == "dvh" or command == "quit":
+    if command == "dvh":
+        parse_dvh_line(plan, trimmed)
+        return
+    if command == "quit":
+        validate_line_syntax(trimmed, ["quit"], List[String]())
+        plan.quit_requested = True
         return
     raise Error("Unsupported .exec command: " + command)
 
 
 def parse_rbe_line(mut plan: ExecPlan, line: String) raises:
+    validate_line_syntax(line, ["rbe", "read"], ["alias"])
     var path_or_name = first_quoted(line)
     if contains_word(line, "read"):
         plan.rbe_tables.append(RBERead(basename_without_suffix(path_or_name), path_or_name))
     elif contains_option(line, "alias"):
-        plan.voi_commands.append(VOICommand(path_or_name, "rbe-alias", option_string(line, "alias", ""), 0.0, 0.0))
+        plan.voi_commands.append(VOICommand(path_or_name, "rbe-alias", option_string(line, "alias", ""), 0.0, 0.0, "", 0.0, 0.0, False))
+    else:
+        raise Error("rbe command must use read or alias")
 
 
 def parse_voi_line(mut plan: ExecPlan, line: String) raises:
+    validate_line_syntax(line, ["voi", "read", "use", "targetset", "oarset"], ["select", "binstate", "weightfactor", "maxdosefraction", "avoidance", "addmargin"])
     var name = first_quoted(line)
     if contains_word(line, "read"):
         plan.voi_base_path = name
+        plan.voi_read_selection = option_string(line, "select", plan.voi_read_selection)
         return
     var action = ""
     if contains_word(line, "targetset"):
         action = "targetset"
     elif contains_word(line, "oarset"):
         action = "oarset"
-    elif contains_word(line, "avoidance"):
+    elif contains_option(line, "avoidance"):
         action = "avoidance"
     elif contains_word(line, "use"):
         action = "use"
-    elif contains_word(line, "addmargin"):
+    elif contains_option(line, "addmargin"):
         action = "addmargin"
-    plan.voi_commands.append(VOICommand(name, action, "", option_float(line, "weightfactor", 0.0), option_float(line, "maxdosefraction", 0.0)))
+    if action.byte_length() == 0 and not contains_word(line, "use"):
+        raise Error("voi command has no supported action")
+    var arguments = option_tuple2(line, "avoidance")
+    if contains_option(line, "addmargin"):
+        arguments.x = option_float(line, "addmargin", 0.0)
+    plan.voi_commands.append(VOICommand(name, action, "", option_float(line, "weightfactor", 0.0), option_float(line, "maxdosefraction", 0.0), option_string(line, "binstate", ""), arguments.x, arguments.y, contains_word(line, "use")))
 
 
 def parse_field_line(mut plan: ExecPlan, line: String) raises:
+    validate_line_syntax(line, ["field", "new", "write"], ["couch", "gantry", "raster", "contourex", "zstep", "distal", "maxthreads", "robustrange", "robustpos", "settargetvoi", "file"])
     var parts = line.split()
     if len(parts) < 2:
         raise Error("field command is missing field number")
@@ -309,9 +371,12 @@ def parse_field_line(mut plan: ExecPlan, line: String) raises:
         plan.fields[index].target_voi = option_string(line, "settargetvoi", plan.fields[index].target_voi)
     elif contains_word(line, "write"):
         plan.fields[index].write_rst_path = option_string(line, "file", plan.fields[index].write_rst_path)
+    else:
+        raise Error("field command must use new or write")
 
 
 def parse_opt_line(mut plan: ExecPlan, line: String) raises:
+    validate_line_syntax(line, ["opt", "bio", "phys", "ctbased", "nopreopt", "nodoseweight", "complexminp"], ["field", "breakcrit", "bioalg", "optalg", "dosealg", "graceiter", "i", "densityalg", "setDTBoundaryWidth", "diedoselim", "eps", "geps", "chisquarelimit", "maxthreads", "maxdosew"])
     plan.has_optimization = True
     plan.optimization.enabled = True
     plan.optimization.biological = contains_word(line, "bio")
@@ -331,9 +396,13 @@ def parse_opt_line(mut plan: ExecPlan, line: String) raises:
     plan.optimization.no_preopt = contains_word(line, "nopreopt")
     plan.optimization.no_dose_weight = contains_word(line, "nodoseweight")
     plan.optimization.complex_min_particles = contains_word(line, "complexminp")
+    plan.optimization.selected_fields = option_string(line, "field", plan.optimization.selected_fields)
+    plan.optimization.ct_based = contains_word(line, "ctbased")
+    plan.optimization.maximum_dose_weight = option_float(line, "maxdosew", plan.optimization.maximum_dose_weight)
 
 
 def parse_dose_line(mut plan: ExecPlan, line: String) raises:
+    validate_line_syntax(line, ["dose", "calc", "bio", "phys", "nosvv", "norbe", "write", "direct"], ["alg", "bioalg", "datatype", "voi", "maxthreads"])
     plan.has_dose_calc = True
     plan.dose_calc.enabled = True
     plan.dose_calc.output_base = first_quoted(line)
@@ -346,6 +415,26 @@ def parse_dose_line(mut plan: ExecPlan, line: String) raises:
     plan.dose_calc.direct = contains_word(line, "direct")
     plan.dose_calc.voi = option_string(line, "voi", plan.dose_calc.voi)
     plan.dose_calc.max_threads = option_int(line, "maxthreads", plan.dose_calc.max_threads)
+    plan.dose_calc.no_svv = contains_word(line, "nosvv")
+    plan.dose_calc.no_rbe = contains_word(line, "norbe")
+
+
+def parse_dvh_line(mut plan: ExecPlan, line: String) raises:
+    validate_line_syntax(line, ["dvh", "calc", "bio", "write"], ["ex"])
+    plan.has_dvh = True
+    plan.dvh.enabled = contains_word(line, "calc")
+    plan.dvh.output_base = first_quoted(line)
+    plan.dvh.biological = contains_word(line, "bio")
+    plan.dvh.exchange_format = option_string(line, "ex", "")
+    plan.dvh.write = contains_word(line, "write")
+
+
+def require_standalone_setup_only(plan: ExecPlan) raises:
+    if plan.has_optimization or plan.has_dose_calc or plan.has_dvh:
+        raise Error("standalone Mojo .exec execution is intentionally unsupported; use the TRiP C control plane and packed Mojo backends")
+    for field in plan.fields:
+        if field.write_rst_path.byte_length() > 0:
+            raise Error("standalone Mojo does not write RST output; use the TRiP C control plane")
 
 
 def field_index(plan: ExecPlan, number: Int) -> Int:
@@ -441,6 +530,62 @@ def contains_word(line: String, word: String) -> Bool:
     for i in range(len(parts)):
         var token = strip_punctuation(String(parts[i]))
         if token == word:
+            return True
+    return False
+
+
+def validate_line_syntax(
+    line: String, allowed_words: List[String], allowed_options: List[String]
+) raises:
+    var quoted = False
+    var depth = 0
+    var index = 0
+    while index < line.byte_length():
+        var c = line[byte=index]
+        if c == "\"":
+            quoted = not quoted
+            index += 1
+            continue
+        if quoted:
+            index += 1
+            continue
+        if c == "(":
+            depth += 1
+            index += 1
+            continue
+        if c == ")":
+            depth -= 1
+            if depth < 0:
+                raise Error("unbalanced .exec option parentheses")
+            index += 1
+            continue
+        if depth == 0 and is_option_name_char(c) and not (
+            c >= "0" and c <= "9"
+        ):
+            var start = index
+            index += 1
+            while index < line.byte_length() and is_option_name_char(
+                line[byte=index]
+            ):
+                index += 1
+            var name = substring(line, start, index)
+            var is_option = index < line.byte_length() and line[byte=index] == "("
+            if is_option:
+                if not string_list_contains(allowed_options, name):
+                    raise Error("unsupported .exec option: " + name)
+            elif not string_list_contains(allowed_words, name):
+                raise Error("unsupported .exec flag or action: " + name)
+            continue
+        index += 1
+    if quoted:
+        raise Error("unterminated quote in .exec command")
+    if depth != 0:
+        raise Error("unbalanced .exec option parentheses")
+
+
+def string_list_contains(values: List[String], expected: String) -> Bool:
+    for value in values:
+        if value == expected:
             return True
     return False
 
