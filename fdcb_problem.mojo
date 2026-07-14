@@ -1,9 +1,9 @@
 """Backend-neutral, owned numeric boundary for FDCB optimization.
 
-All variable-length storage is held in flat contiguous Lists. Indices in the
-boundary are fixed-width so a later C ABI can describe the same layout without
-exposing Mojo objects. Lists own their memory in this milestone; no pointer or
-device ownership is part of the model.
+All variable-length storage is held in flat contiguous Lists with fixed-width
+indices. Native callers own those Lists directly. C callers may instead ask
+Mojo to allocate the same storage, fill borrowed array pointers, and retain one
+owner until the packed problem is destroyed.
 """
 
 from std.algorithm import parallelize
@@ -20,6 +20,7 @@ comptime FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG = UInt32(2)
 comptime FDCB_FLAG_ROBUST_INCLUDE_DMAX = UInt32(1)
 comptime FDCB_FLAG_BIOLOGICAL = UInt32(2)
 comptime FDCB_FLAG_INITIALIZE = UInt32(4)
+comptime FDCB_FLAG_DEVICE_BOOTSTRAP = UInt32(8)
 comptime FDCB_MEV_TO_GY = 1.602189e-8
 comptime FDCB_FLOAT64_EPSILON = 2.220446049250313e-16
 comptime FDCB_PHYSICAL_CPU_THREADS = get_defined_int["FDCB_CPU_THREADS", 12]()
@@ -155,6 +156,12 @@ struct FDCBScenarioStateV1(Copyable, Movable):
 @fieldwise_init
 struct FDCBProblemV1(Copyable, Movable):
     """Owned packed problem. Backends borrow these arrays for one optimization.
+
+    CT motion states are deliberately not a numeric axis here. TRiP appends
+    every selected state's optimization voxels to `voxels`; each flattened
+    voxel then owns the same robust-scenario range as a 3D voxel. This keeps
+    4D setup/deformation in the control plane while CPU and accelerator
+    backends run exactly the same sparse FDCB kernels.
     """
 
     var version: UInt32
@@ -176,7 +183,9 @@ struct FDCBProblemV1(Copyable, Movable):
     var coefficients: List[Float64]
 
     def validate(
-        self, required_precision: UInt32 = FDCB_PRECISION_REFERENCE
+        self,
+        required_precision: UInt32 = FDCB_PRECISION_REFERENCE,
+        external_coefficient_count: UInt64 = UInt64.MAX,
     ) raises:
         if self.version != FDCB_PROBLEM_VERSION_V1:
             raise Error("unsupported FDCB packed problem version")
@@ -206,8 +215,14 @@ struct FDCBProblemV1(Copyable, Movable):
             raise Error("FDCB point arrays have inconsistent lengths")
         if self.settings.active_point_count > UInt32(len(self.particles)):
             raise Error("FDCB active point count exceeds the point arrays")
-        if len(self.coefficient_point_indices) != len(self.coefficients):
+        var coefficients_are_external = external_coefficient_count != UInt64.MAX
+        if not coefficients_are_external and len(
+            self.coefficient_point_indices
+        ) != len(self.coefficients):
             raise Error("FDCB coefficient arrays have inconsistent lengths")
+        var available_coefficients = UInt64(len(self.coefficients))
+        if coefficients_are_external:
+            available_coefficients = external_coefficient_count
         if len(self.voxel_scenarios) != len(self.voxels) * Int(
             self.scenario_count
         ):
@@ -293,14 +308,14 @@ struct FDCBProblemV1(Copyable, Movable):
             for scenario_index in range(Int(self.scenario_count)):
                 var vs_index = Int(voxel.scenario_offset) + scenario_index
                 var voxel_scenario = self.voxel_scenarios[vs_index].copy()
-                if voxel_scenario.slice_offset != expected_slice_offset:
-                    raise Error(
-                        "voxel scenario slice ranges must be contiguous"
-                    )
                 if voxel_scenario.slice_offset + UInt64(
                     voxel_scenario.slice_count
                 ) > UInt64(len(self.slices)):
                     raise Error("voxel scenario slice range is out of bounds")
+                if voxel_scenario.slice_offset != expected_slice_offset:
+                    raise Error(
+                        "voxel scenario slice ranges must be contiguous"
+                    )
                 expected_slice_offset += UInt64(voxel_scenario.slice_count)
         if expected_slice_offset != UInt64(len(self.slices)):
             raise Error("voxel scenario ranges do not cover packed slices")
@@ -309,13 +324,17 @@ struct FDCBProblemV1(Copyable, Movable):
             var packed_slice = self.slices[slice_index].copy()
             if Int(packed_slice.field_slice_index) >= len(self.field_slices):
                 raise Error("FDCB slice has invalid field-slice index")
-            if packed_slice.coefficient_offset + UInt64(
-                packed_slice.coefficient_count
-            ) > UInt64(len(self.coefficients)):
+            if (
+                packed_slice.coefficient_offset
+                + UInt64(packed_slice.coefficient_count)
+                > available_coefficients
+            ):
                 raise Error("FDCB slice coefficient range is out of bounds")
             var field_slice = self.field_slices[
                 Int(packed_slice.field_slice_index)
             ].copy()
+            if coefficients_are_external:
+                continue
             for entry in range(Int(packed_slice.coefficient_count)):
                 var coefficient_index = (
                     Int(packed_slice.coefficient_offset) + entry
@@ -471,7 +490,9 @@ def evaluate_validated_packed_physical_fdcb(
     @parameter
     def scatter_worker(worker: Int):
         var start = worker * len(problem.voxels) // FDCB_PHYSICAL_CPU_THREADS
-        var end = (worker + 1) * len(problem.voxels) // FDCB_PHYSICAL_CPU_THREADS
+        var end = (
+            (worker + 1) * len(problem.voxels) // FDCB_PHYSICAL_CPU_THREADS
+        )
         var output_base = worker * point_count
         for voxel_index in range(start, end):
             var voxel = problem.voxels[voxel_index].copy()
@@ -494,10 +515,8 @@ def evaluate_validated_packed_physical_fdcb(
                 output_base,
             )
             if (
-                (problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX)
-                != UInt32(0)
-                and voxel.prescribed_dose > 0.0
-            ):
+                problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX
+            ) != UInt32(0) and voxel.prescribed_dose > 0.0:
                 scatter_packed_physical_gradient(
                     problem,
                     particles,
@@ -510,9 +529,9 @@ def evaluate_validated_packed_physical_fdcb(
                     output_base,
                 )
 
-    parallelize[
-        scatter_worker
-    ](FDCB_PHYSICAL_CPU_THREADS, FDCB_PHYSICAL_CPU_THREADS)
+    parallelize[scatter_worker](
+        FDCB_PHYSICAL_CPU_THREADS, FDCB_PHYSICAL_CPU_THREADS
+    )
     for worker in range(FDCB_PHYSICAL_CPU_THREADS):
         var base = worker * point_count
         for point in range(point_count):
@@ -581,9 +600,9 @@ def scatter_packed_physical_gradient(
             factor * Float64(packed_slice.dose_coefficient) * FDCB_MEV_TO_GY
         )
         for local_entry in range(Int(packed_slice.coefficient_count)):
-            var coefficient_index = Int(
-                packed_slice.coefficient_offset
-            ) + local_entry
+            var coefficient_index = (
+                Int(packed_slice.coefficient_offset) + local_entry
+            )
             var point_index = Int(field_slice.point_offset) + Int(
                 index_ptr[coefficient_index]
             )
@@ -591,9 +610,9 @@ def scatter_packed_physical_gradient(
                 active_ptr[point_index] != UInt8(0)
                 and particle_ptr[point_index] != 0.0
             ):
-                gradient_ptr[output_base + point_index] += (
-                    slice_factor * Float64(coefficient_ptr[coefficient_index])
-                )
+                gradient_ptr[
+                    output_base + point_index
+                ] += slice_factor * Float64(coefficient_ptr[coefficient_index])
 
 
 def abs_f64(value: Float64) -> Float64:

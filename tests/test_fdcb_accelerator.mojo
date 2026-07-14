@@ -7,6 +7,7 @@ from fdcb_cpu import (
     fdcb_exact_step_biological,
     fdcb_exact_step_physical,
     packed_slice_dot,
+    packed_zero_gradient_direction,
 )
 from fdcb_optimize import (
     optimize_packed_fdcb,
@@ -26,7 +27,11 @@ from fdcb_problem import (
 )
 from fdcb_problem import FDCBMinimumParticlePolicyV1, FDCBSettingsV1
 from test_fdcb_cpu import build_biological_problem
-from test_fdcb_problem import build_multifield_problem, build_problem
+from test_fdcb_problem import (
+    build_flattened_4d_robust_problem,
+    build_multifield_problem,
+    build_problem,
+)
 
 
 def assert_float64_device_equal(actual: Float64, expected: Float64) raises:
@@ -89,6 +94,16 @@ def test_accelerator_slice_dots_match_cpu() raises:
             expected[4] += dot * Float64(packed_slice.let_bar_coefficient)
         for moment in range(5):
             assert_equal(moments[scenario_index * 5 + moment], expected[moment])
+
+
+def test_accelerator_zero_gradient_matches_cpu() raises:
+    var problem = build_multifield_problem()
+    var expected = packed_zero_gradient_direction(problem)
+    var accelerator = FDCBAccelerator(problem)
+    var actual = accelerator.zero_gradient_direction()
+    assert_equal(len(actual), len(expected))
+    for point in range(len(expected)):
+        assert_float64_device_equal(actual[point], expected[point])
 
 
 def test_accelerator_biological_evaluation_matches_cpu() raises:
@@ -242,6 +257,26 @@ def test_accelerator_multifield_matches_cpu() raises:
         )
 
 
+def test_accelerator_flattened_4d_robust_matches_cpu() raises:
+    var problem = build_flattened_4d_robust_problem()
+    var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
+    var accelerator = FDCBAccelerator(problem)
+    var actual = accelerator.evaluation(problem.particles)
+    for voxel in range(len(problem.voxels)):
+        assert_float64_device_equal(
+            actual.dose_min[voxel], expected.dose_min[voxel]
+        )
+        assert_float64_device_equal(
+            actual.dose_max[voxel], expected.dose_max[voxel]
+        )
+        assert_equal(actual.min_scenario[voxel], expected.min_scenario[voxel])
+        assert_equal(actual.max_scenario[voxel], expected.max_scenario[voxel])
+    for point in range(len(expected.gradient)):
+        assert_float64_device_equal(
+            actual.gradient[point], expected.gradient[point]
+        )
+
+
 def test_accelerator_preserves_nonmonotonic_slice_ranges() raises:
     var problem = build_problem()
     var first_offset = problem.slices[0].coefficient_offset
@@ -264,9 +299,7 @@ def test_accelerator_preserves_nonmonotonic_slice_ranges() raises:
         )
 
 
-def check_compact_index_width(
-    point_count: Int, local_point: Int, expected_bits: Int
-) raises:
+def check_contiguous_uint16_indices(point_count: Int, local_point: Int) raises:
     var problem = build_problem()
     problem.field_slices[0].point_count = UInt32(point_count)
     problem.particles.resize(point_count, 0.0)
@@ -278,7 +311,6 @@ def check_compact_index_width(
     problem.validate()
     var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
     var accelerator = FDCBAccelerator(problem)
-    assert_equal(accelerator.coefficient_index_bits, expected_bits)
     var dots = accelerator.slice_dots(problem.particles)
     for i in range(len(problem.slices)):
         assert_float64_device_equal(
@@ -293,9 +325,9 @@ def check_compact_index_width(
         )
 
 
-def test_accelerator_compacts_indices_losslessly() raises:
-    check_compact_index_width(300, 299, 12)
-    check_compact_index_width(4097, 4096, 16)
+def test_accelerator_consumes_contiguous_uint16_indices() raises:
+    check_contiguous_uint16_indices(300, 299)
+    check_contiguous_uint16_indices(4097, 4096)
 
 
 def test_accelerator_full_iterations_match_cpu() raises:
@@ -384,11 +416,13 @@ def main() raises:
     comptime assert has_accelerator(), "accelerator test requires a GPU"
     comptime if has_accelerator():
         test_accelerator_slice_dots_match_cpu()
+        test_accelerator_zero_gradient_matches_cpu()
         test_accelerator_biological_evaluation_matches_cpu()
         test_accelerator_physical_evaluation_matches_cpu()
         test_accelerator_multifield_matches_cpu()
+        test_accelerator_flattened_4d_robust_matches_cpu()
         test_accelerator_preserves_nonmonotonic_slice_ranges()
-        test_accelerator_compacts_indices_losslessly()
+        test_accelerator_consumes_contiguous_uint16_indices()
         test_accelerator_full_iterations_match_cpu()
         test_accelerator_physical_iterations_match_cpu()
         test_accelerator_metric_reduction_crosses_blocks()

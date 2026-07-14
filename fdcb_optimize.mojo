@@ -11,12 +11,14 @@ from fdcb_cpu import (
 from fdcb_min_particles import (
     FDCBHostRNG,
     FDCBMinimumParticleResult,
+    apply_final_minimum_particle_limit,
     make_host_rng,
     update_with_minimum_particle_policy,
 )
 from fdcb_problem import (
     FDCBProblemV1,
     FDCB_FLAG_BIOLOGICAL,
+    FDCB_FLAG_DEVICE_BOOTSTRAP,
     FDCB_FLAG_INITIALIZE,
     evaluate_validated_packed_physical_fdcb,
 )
@@ -108,6 +110,11 @@ def evaluate_validated_packed_iteration(
 
 
 trait FDCBEvaluator:
+    def initial_direction(
+        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+    ) raises -> List[Float64]:
+        ...
+
     def evaluate(
         mut self, problem: FDCBProblemV1, particles: List[Float64]
     ) raises -> FDCBIterationEvaluation:
@@ -131,6 +138,11 @@ struct FDCBCPUEvaluator(FDCBEvaluator):
     ) raises -> FDCBIterationEvaluation:
         return evaluate_validated_packed_iteration(problem, particles)
 
+    def initial_direction(
+        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+    ) raises -> List[Float64]:
+        return initial_direction(problem, gradient)
+
     def exact_step(
         mut self,
         problem: FDCBProblemV1,
@@ -153,6 +165,18 @@ struct FDCBDeviceEvaluator(FDCBEvaluator, Movable):
     def __init__(out self, problem: FDCBProblemV1) raises:
         self.accelerator = FDCBAccelerator(problem)
 
+    def __init__[
+        origin: Origin
+    ](
+        out self,
+        problem: FDCBProblemV1,
+        matrix_storage: OpaquePointer[origin],
+        coefficient_count: Int,
+    ) raises:
+        self.accelerator = FDCBAccelerator(
+            problem, matrix_storage, coefficient_count
+        )
+
     def evaluate(
         mut self, problem: FDCBProblemV1, particles: List[Float64]
     ) raises -> FDCBIterationEvaluation:
@@ -168,6 +192,13 @@ struct FDCBDeviceEvaluator(FDCBEvaluator, Movable):
             result.weighted_dose2(),
             result.gradient_norm,
         )
+
+    def initial_direction(
+        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+    ) raises -> List[Float64]:
+        if (problem.settings.flags & FDCB_FLAG_DEVICE_BOOTSTRAP) != UInt32(0):
+            return self.accelerator.zero_gradient_direction()
+        return initial_direction(problem, gradient)
 
     def exact_step(
         mut self,
@@ -195,6 +226,19 @@ def optimize_packed_fdcb_accelerator(
     return optimize_packed_fdcb_with_evaluator(problem, evaluator)
 
 
+def optimize_packed_fdcb_accelerator_matrix[
+    origin: Origin
+](
+    problem: FDCBProblemV1,
+    matrix_storage: OpaquePointer[origin],
+    coefficient_count: Int,
+) raises -> FDCBOptimizationResult:
+    var evaluator = FDCBDeviceEvaluator(
+        problem, matrix_storage, coefficient_count
+    )
+    return optimize_packed_fdcb_with_evaluator(problem, evaluator)
+
+
 def optimize_packed_fdcb_with_evaluator[
     Evaluator: FDCBEvaluator
 ](
@@ -204,7 +248,7 @@ def optimize_packed_fdcb_with_evaluator[
         raise Error("packed FDCB optimizer requires max_iterations > 0")
     var particles = problem.particles.copy()
     var evaluation = evaluator.evaluate(problem, particles)
-    var direction = initial_direction(problem, evaluation.gradient)
+    var direction = evaluator.initial_direction(problem, evaluation.gradient)
     var active_gradient_norm = evaluation.gradient_norm
     if (problem.settings.flags & FDCB_FLAG_INITIALIZE) != UInt32(0):
         active_gradient_norm = vector_norm(direction)
@@ -358,6 +402,11 @@ def optimize_packed_fdcb_with_evaluator[
         direction = fletcher_reeves_direction(
             problem, evaluation.gradient, old_gradient, direction
         )
+
+    var final_minimum = apply_final_minimum_particle_limit(problem, particles)
+    if final_minimum.changed > UInt64(0):
+        deleted += final_minimum.deleted
+        evaluation = evaluator.evaluate(problem, particles)
 
     return FDCBOptimizationResult(
         particles^,

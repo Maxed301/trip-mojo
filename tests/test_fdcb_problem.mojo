@@ -120,9 +120,7 @@ def test_layout_and_precision() raises:
     assert_equal(len(problem.coefficients), 8)
     assert_equal(problem.coefficients[0], 0.008)
     assert_true(problem.coefficients[0] != Float64(Float32(0.008)))
-    assert_equal(
-        problem.slices[0].dose_coefficient, 1.0 / FDCB_MEV_TO_GY
-    )
+    assert_equal(problem.slices[0].dose_coefficient, 1.0 / FDCB_MEV_TO_GY)
 
 
 def test_multifield_packing_layout_and_math() raises:
@@ -184,7 +182,7 @@ def test_validation_rejects_bad_ranges() raises:
         problem.validate()
 
     problem = build_problem()
-    problem.voxel_scenarios[1].slice_offset = UInt64(0)
+    problem.voxel_scenarios[1].slice_offset = UInt64(len(problem.slices))
     with assert_raises():
         problem.validate()
 
@@ -308,6 +306,67 @@ def test_gradient_backprojection() raises:
     assert_true(evaluation.gradient[1] != 0.0)
 
 
+def build_flattened_4d_robust_problem() raises -> FDCBProblemV1:
+    # Rows 0/1 are motion state 0 and rows 2/3 are motion state 1. The packed
+    # optimizer intentionally sees four voxels; robust scenarios remain the
+    # inner, voxel-major axis and select independently for every state row.
+    var scenario0 = [
+        SparseDoseEntry(0, 0, 0.10),
+        SparseDoseEntry(1, 1, 0.20),
+        SparseDoseEntry(2, 0, 0.30),
+        SparseDoseEntry(3, 1, 0.40),
+    ]
+    var scenario1 = [
+        SparseDoseEntry(0, 0, 0.20),
+        SparseDoseEntry(1, 1, 0.10),
+        SparseDoseEntry(2, 0, 0.10),
+        SparseDoseEntry(3, 1, 0.50),
+    ]
+    var scenario2 = [
+        SparseDoseEntry(0, 0, 0.15),
+        SparseDoseEntry(1, 1, 0.30),
+        SparseDoseEntry(2, 0, 0.40),
+        SparseDoseEntry(3, 1, 0.20),
+    ]
+    var matrices = [
+        SparseDoseMatrix(4, 2, scenario0^),
+        SparseDoseMatrix(4, 2, scenario1^),
+        SparseDoseMatrix(4, 2, scenario2^),
+    ]
+    var objectives = [
+        FDCBVoxelObjective(4.0, 1.0, 1.0, 0.0, 0.05),
+        FDCBVoxelObjective(4.0, 1.0, 1.0, 0.0, 0.05),
+        FDCBVoxelObjective(4.0, 1.0, 1.0, 0.0, 0.05),
+        FDCBVoxelObjective(4.0, 1.0, 1.0, 0.0, 0.05),
+    ]
+    return pack_physical_fdcb_problem_v1(
+        FDCBScenarioSet(matrices^),
+        objectives,
+        [10.0, 20.0],
+        FDCBSettingsV1.reference_defaults(),
+        FDCBMinimumParticlePolicyV1.disabled(),
+    )
+
+
+def test_flattened_4d_states_keep_robust_axis_independent() raises:
+    var problem = build_flattened_4d_robust_problem()
+    assert_equal(len(problem.voxels), 4)
+    assert_equal(len(problem.voxel_scenarios), 12)
+    assert_equal(problem.voxels[2].scenario_offset, UInt64(6))
+
+    var evaluation = evaluate_packed_physical_fdcb(problem, problem.particles)
+    assert_equal(evaluation.min_scenario[0], Int32(0))
+    assert_equal(evaluation.min_scenario[1], Int32(1))
+    assert_equal(evaluation.min_scenario[2], Int32(1))
+    assert_equal(evaluation.min_scenario[3], Int32(2))
+    assert_equal(evaluation.max_scenario[0], Int32(1))
+    assert_equal(evaluation.max_scenario[1], Int32(2))
+    assert_equal(evaluation.max_scenario[2], Int32(2))
+    assert_equal(evaluation.max_scenario[3], Int32(1))
+    assert_true(evaluation.gradient[0] != 0.0)
+    assert_true(evaluation.gradient[1] != 0.0)
+
+
 def test_exact_directional_reduction() raises:
     var problem = build_problem()
     var evaluation = evaluate_packed_physical_fdcb(problem, problem.particles)
@@ -349,7 +408,9 @@ def test_exact_directional_reduction() raises:
         / problem.voxels[1].dose_divisor
         * oar_weighted
     )
-    var denominator = target_weighted * target_weighted + oar_weighted * oar_weighted
+    var denominator = (
+        target_weighted * target_weighted + oar_weighted * oar_weighted
+    )
     assert_close(step, numerator / denominator, 1.0e-14)
 
 
@@ -362,4 +423,5 @@ def main() raises:
     test_nonmonotonic_coefficient_ranges()
     test_sparse_forward_and_robust_selection()
     test_gradient_backprojection()
+    test_flattened_4d_states_keep_robust_axis_independent()
     test_exact_directional_reduction()

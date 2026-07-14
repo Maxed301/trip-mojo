@@ -81,6 +81,45 @@ struct FDCBParticleUpdate(Copyable, Movable):
     var minimum_particles: FDCBMinimumParticleResult
 
 
+@fieldwise_init
+struct FDCBFinalMinimumParticleResult(Copyable, Movable):
+    var changed: UInt64
+    var deleted: UInt64
+
+
+def apply_final_minimum_particle_limit(
+    problem: FDCBProblemV1, mut particles: List[Float64]
+) raises -> FDCBFinalMinimumParticleResult:
+    """Apply TRiP's non-random post-optimization complexminp clamp."""
+    if len(particles) != len(problem.particles):
+        raise Error("minimum-particle vector length mismatch")
+    if (
+        problem.minimum_particle_policy.kind
+        != FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+    ):
+        return FDCBFinalMinimumParticleResult(UInt64(0), UInt64(0))
+    var changed = UInt64(0)
+    var deleted = UInt64(0)
+    for field_slice in problem.field_slices:
+        var base = Int(field_slice.point_offset)
+        for local_point in range(Int(field_slice.point_count)):
+            var point = base + local_point
+            var value = particles[point]
+            if (
+                problem.point_active[point] == UInt8(0)
+                or value == 0.0
+                or value >= field_slice.minimum_particles
+            ):
+                continue
+            changed += UInt64(1)
+            if value < 0.8 * field_slice.minimum_particles:
+                particles[point] = 0.0
+                deleted += UInt64(1)
+            else:
+                particles[point] = field_slice.minimum_particles
+    return FDCBFinalMinimumParticleResult(changed, deleted)
+
+
 def apply_minimum_particle_policy(
     problem: FDCBProblemV1,
     mut particles: List[Float64],
@@ -181,14 +220,12 @@ def handle_minimum_particle(
         return FDCBMinimumParticleResult(UInt64(0), UInt64(1))
     var previous = particles[point]
     var particle_probability = 1.0 / (
-        1.0
-        + reference_exp(-(previous / field_slice.minimum_particles - 0.5))
+        1.0 + reference_exp(-(previous / field_slice.minimum_particles - 0.5))
     )
     var gradient_probability = 0.5
     if abs(gradient_limit) > 1.0e-30:
         gradient_probability = 1.0 / (
-            1.0
-            + reference_exp(-0.25 * direction[point] / gradient_limit)
+            1.0 + reference_exp(-0.25 * direction[point] / gradient_limit)
         )
     var was_deleted = not rng.less_than(
         particle_probability * gradient_probability

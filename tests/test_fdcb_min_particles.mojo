@@ -2,6 +2,7 @@ from std.testing import assert_equal, assert_true
 
 from fdcb_min_particles import (
     FDCBHostRNG,
+    apply_final_minimum_particle_limit,
     apply_minimum_particle_policy,
     update_with_minimum_particle_policy,
 )
@@ -66,8 +67,22 @@ def test_update_preserves_trip_point_order() raises:
     assert_equal(update.particles[1], 120.0)
 
 
+def test_final_complex_limit_matches_trip_threshold() raises:
+    var problem = build_problem()
+    problem.minimum_particle_policy.kind = FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+    problem.field_slices[0].minimum_particles = 100.0
+    problem.point_active = [UInt8(1), UInt8(1)]
+    var particles = [79.0, 80.0]
+    var result = apply_final_minimum_particle_limit(problem, particles)
+    assert_equal(particles[0], 0.0)
+    assert_equal(particles[1], 100.0)
+    assert_equal(result.changed, UInt64(2))
+    assert_equal(result.deleted, UInt64(1))
+
+
 def main() raises:
     test_reference_rng_sequence()
     test_complex_policy_is_seeded_and_repeatable()
     test_rng_state_restores_exact_position()
     test_update_preserves_trip_point_order()
+    test_final_complex_limit_matches_trip_threshold()

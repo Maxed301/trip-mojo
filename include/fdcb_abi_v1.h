@@ -12,6 +12,7 @@ enum {
     FDCB_FLAG_ROBUST_INCLUDE_DMAX = 1u << 0,
     FDCB_FLAG_BIOLOGICAL = 1u << 1,
     FDCB_FLAG_INITIALIZE = 1u << 2,
+    FDCB_FLAG_DEVICE_BOOTSTRAP = 1u << 3,
     FDCB_PRECISION_REFERENCE = 1,
     FDCB_PRECISION_MIXED32 = 2,
     FDCB_MIN_PARTICLE_DISABLED = 0,
@@ -21,7 +22,8 @@ enum {
     FDCB_DOSE_MS = 1,
     FDCB_DOSE_MSDB = 2,
     FDCB_BIOLOGY_NONE = 0,
-    FDCB_BIOLOGY_LOW_DOSE = 1
+    FDCB_BIOLOGY_LOW_DOSE = 1,
+    FDCB_RESULT_FINAL_MIN_PARTICLES_APPLIED = 1u << 0
 };
 
 /* CPU entry points accept REFERENCE only. Accelerator entry points accept the
@@ -138,6 +140,26 @@ typedef struct {
     const double *coefficients;
 } FDCBProblemViewV1;
 
+/* Mojo owns these pre-sized contiguous arrays. C fills every element exactly
+ * once before invoking a storage optimizer entry point. */
+typedef struct {
+    FDCBFieldSliceV1 *field_slices;
+    uint32_t *rng_state;
+    double *particles;
+    double *initial_direction;
+    double *initial_gradient;
+    uint8_t *point_active;
+    FDCBVoxelV1 *voxels;
+    FDCBVoxelScenarioV1 *voxel_scenarios;
+    FDCBScenarioStateV1 *scenario_states;
+    FDCBSliceV1 *slices;
+    uint16_t *coefficient_point_indices;
+    double *coefficients;
+} FDCBWritableArraysV1;
+
+typedef struct FDCBProblemStorageV1 FDCBProblemStorageV1;
+struct FDCBMatrixStorageV1;
+
 typedef struct {
     double chi2;
     double residual_percent;
@@ -150,7 +172,7 @@ typedef struct {
     uint64_t minimum_particle_deleted;
     uint64_t random_draws;
     uint32_t stop_reason;
-    uint32_t reserved;
+    uint32_t flags;
 } FDCBResultV1;
 
 typedef struct {
@@ -159,6 +181,54 @@ typedef struct {
     double gradient_norm;
     double residual_percent;
 } FDCBEvaluationResultV1;
+
+int32_t trip_fdcb_storage_create_v1(
+    const FDCBProblemViewV1 *problem_template,
+    FDCBProblemStorageV1 **storage_out,
+    FDCBWritableArraysV1 *arrays_out
+);
+
+int32_t trip_fdcb_matrix_problem_storage_create_v1(
+    const FDCBProblemViewV1 *problem_template,
+    struct FDCBMatrixStorageV1 *matrix_storage,
+    FDCBProblemStorageV1 **storage_out,
+    FDCBWritableArraysV1 *arrays_out
+);
+
+int32_t trip_fdcb_storage_destroy_v1(FDCBProblemStorageV1 *storage);
+
+int32_t trip_fdcb_matrix_problem_storage_destroy_v1(
+    FDCBProblemStorageV1 *storage
+);
+
+int32_t trip_fdcb_storage_evaluate_v1(
+    FDCBProblemStorageV1 *storage,
+    double *gradient_out,
+    uint64_t gradient_out_count,
+    FDCBEvaluationResultV1 *result_out
+);
+
+int32_t trip_fdcb_storage_optimize_v1(
+    FDCBProblemStorageV1 *storage,
+    double *particles_out,
+    uint64_t particles_out_count,
+    FDCBResultV1 *result_out
+);
+
+/* Returns -3 unless built with FDCB_ABI_ACCELERATOR=true and a GPU target. */
+int32_t trip_fdcb_storage_optimize_accelerator_v1(
+    FDCBProblemStorageV1 *storage,
+    double *particles_out,
+    uint64_t particles_out_count,
+    FDCBResultV1 *result_out
+);
+
+int32_t trip_fdcb_matrix_problem_optimize_accelerator_v1(
+    FDCBProblemStorageV1 *storage,
+    double *particles_out,
+    uint64_t particles_out_count,
+    FDCBResultV1 *result_out
+);
 
 int32_t trip_fdcb_evaluate_v1(
     const FDCBProblemViewV1 *problem,
