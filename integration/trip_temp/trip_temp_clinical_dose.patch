@@ -1,0 +1,21 @@
+diff --git a/trpdose.c b/trpdose.c
+--- a/trpdose.c
++++ b/trpdose.c
+@@ -7962,6 +7962,8 @@ int TRPDoseCalcDOTA_readFiles(
+ /*
+  * ===========================================================================
+  */
++#include "clinical_dose_mojo_bridge.inc"
++
+ /**
+  * @brief Minimal version of dose calc
+  * @details
+@@ -7988,5 +7990,8 @@ int TRPDoseCalcDirect(
+                  uint32_t ulFlag             /**< inp: function action flags  */
+ ) {
++   if ( getenv("TRIP_CLINICAL_DOSE_MOJO") )
++      return TRPClinicalDoseMojoRun(psDC, psFB, psWdw, psTrafo, ulFlag);
++
+    /* debug message for this function, will be printed upon entering the function if ulFlag contains debug bit */
+    const char *pcDbgMsg = __FILE__"(DoseCalcDirect)"; char *pcMsg = (char *) pcDbgMsg;
+    struct SCMDERR sCE; // error handler, second one is for warning level severity

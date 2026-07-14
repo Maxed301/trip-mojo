@@ -55,10 +55,33 @@ took 30.461 s; shared-node variation remains visible.
 
 ## Integration
 
-Hydra keeps one `trip_temp` checkout at commit `1fb423f`, patched once with
-`integration/trip_temp/trip_temp_mojo.patch`. `build_h200.sh` updates the two
-persistent binaries. `run_h200_4d.sh` only prepares the exec, runs the case and
-compares both RSTs; it performs no source copying or build.
+Hydra keeps one `trip_temp` checkout at commit `1fb423f`, patched once with the
+optimizer and clinical-dose patches under `integration/trip_temp`.
+`build_h200.sh` updates the two persistent binaries. `run_h200_4d.sh` only
+prepares the exec, runs the case and compares both RSTs; it performs no source
+copying or build.
 
-The direct boundary currently covers robust optimization and RST ownership.
-4D clinical-dose deformation and accumulation remain outside Mojo.
+## 4D clinical dose
+
+The dose ABI flattens state field ranges, CT descriptors and transformed voxel
+positions into contiguous state-major arrays. TRiP owns motion transforms and
+maps reference-grid positions into every state. Mojo evaluates each state with
+its CT and RST, reduces the six raw Float64 dose terms in state order, and
+returns one reference-grid result for normal TRiP storage.
+
+The canonical optimizer exec stops after writing RSTs and the case data has no
+deformation field. `run_h200_4d_dose.sh` therefore creates a separate transient
+dose exec, expands the optimized static delivery into equal-weight state RSTs
+with TRiP's `perfectrescan`, and generates a Tumor center-of-mass translation.
+This is useful for exact `trip_temp` versus Mojo implementation comparison
+under the same motion model, but is not evidence of deformable clinical-dose
+parity. Smoothed 4D, per-state output, arc, oxygen and lung modulation are
+rejected explicitly.
+
+H200 job 22069 confirmed that the accelerator adapter received ten states,
+41,446 reference-grid voxels and 20 flattened state fields. The physical and
+biological Float32 cubes each contained 39,059,456 voxels with identical
+11,764-voxel support; both were byte-identical to `trip_temp` (`relative_l2=0`,
+`max_abs=0`). `DoseCmd` took 8.17 s in `trip_temp` and 10.62 s through Mojo. The
+current small Tumor-only workload does not amortize host packing and GPU
+transfer, so this is a correctness result rather than a speedup claim.

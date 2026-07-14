@@ -20,7 +20,9 @@ from clinical_dose import (
     ClinicalDoseOutputV1,
     ClinicalDosePointRun,
     ClinicalDosePointV1,
+    ClinicalDosePositionV1,
     ClinicalDoseProblemViewV1,
+    ClinicalDoseStateV1,
     DDDInterpolation,
     CLINICAL_DOSE_8LN2,
     CLINICAL_DOSE_BIOLOGICAL,
@@ -104,6 +106,9 @@ def clinical_dose_kernel(
     integer_metadata: UnsafePointer[Int64, MutAnyOrigin],
     floating_metadata: UnsafePointer[Float64, MutAnyOrigin],
     voxel_voi: UnsafePointer[Int32, MutAnyOrigin],
+    ct_states: UnsafePointer[ClinicalDoseCTStateV1, MutAnyOrigin],
+    states: UnsafePointer[ClinicalDoseStateV1, MutAnyOrigin],
+    transformed_voxels: UnsafePointer[ClinicalDosePositionV1, MutAnyOrigin],
     ct_data: UnsafePointer[Int16, MutAnyOrigin],
     dense_hlut: UnsafePointer[Float64, MutAnyOrigin],
     grid_fields: UnsafePointer[ClinicalDoseGridFieldV1, MutAnyOrigin],
@@ -118,10 +123,13 @@ def clinical_dose_kernel(
     point_runs: UnsafePointer[ClinicalDosePointRun, MutAnyOrigin],
     output: UnsafePointer[ClinicalDoseOutputV1, MutAnyOrigin],
 ):
-    var voxel = global_idx.x
+    var work_index = global_idx.x
     var voxel_count = Int(integer_metadata[0])
-    if voxel >= voxel_count:
+    var state_count = Int(integer_metadata[4])
+    if work_index >= voxel_count * state_count:
         return
+    var state_index = work_index // voxel_count
+    var voxel = work_index - state_index * voxel_count
 
     var result = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     var flags = UInt32(integer_metadata[1])
@@ -132,20 +140,11 @@ def clinical_dose_kernel(
     if biological:
         voi = Int(voxel_voi[voxel])
         if voi < 0 or voi >= voi_count:
-            output[voxel] = result^
+            output[work_index] = result^
             return
 
-    var dose_grid = _grid_from_metadata(
-        integer_metadata, floating_metadata, 4, 0
-    )
-    var ct_grid = _grid_from_metadata(integer_metadata, floating_metadata, 7, 9)
-    var ct_state = ClinicalDoseCTStateV1(
-        ct_grid^,
-        UInt64(integer_metadata[10]),
-        floating_metadata[18],
-        floating_metadata[19],
-        Int32(integer_metadata[11]),
-    )
+    var dose_grid = _grid_from_metadata(integer_metadata, floating_metadata, 5, 0)
+    var ct_state = ct_states[state_index].copy()
     var nx = Int(dose_grid.nx)
     var ny = Int(dose_grid.ny)
     var ix = voxel % nx
@@ -154,8 +153,18 @@ def clinical_dose_kernel(
     var px = dose_grid.x0 + Float64(ix) * dose_grid.dx
     var py = dose_grid.y0 + Float64(iy) * dose_grid.dy
     var pz = dose_grid.z0 + Float64(iz) * dose_grid.dz
+    var field_offset = 0
+    var state_field_count = field_count
+    if state_count > 1:
+        var state = states[state_index].copy()
+        field_offset = Int(state.field_offset)
+        state_field_count = Int(state.field_count)
+        var position = transformed_voxels[work_index].copy()
+        px = position.x
+        py = position.y
+        pz = position.z
 
-    for field_local in range(field_count):
+    for field_local in range(field_offset, field_offset + state_field_count):
         var grid_field = grid_fields[field_local].copy()
         if (
             grid_field.gated != Int32(0)
@@ -219,16 +228,12 @@ def clinical_dose_kernel(
                 continue
             var table = ddd_tables[Int(energy.ddd_table)].copy()
             var focus2 = Float64(energy.focus) * Float64(energy.focus)
+            var bio_table = ClinicalDoseBioTableV1(UInt32(0), UInt32(0), 0.0)
             var bio = BioInterpolation(0.0, 0.0, 0.0, 0.0, 0.0)
             if biological:
-                var bio_table = bio_tables[
+                bio_table = bio_tables[
                     Int(energy.bio_table_offset) + voi
                 ].copy()
-                bio = interpolate_bio(
-                    bio_table,
-                    bio_entries,
-                    h2o * Float64(bio_table.z_scale),
-                )
             var last_z = Float64.MAX
             var depth = DDDInterpolation(False, 0.0, 0.0, 0.0, 0.0)
             for run_index in range(
@@ -295,6 +300,13 @@ def clinical_dose_kernel(
                                 * (isig2_1 / CLINICAL_DOSE_PI)
                                 * depth.mix
                             )
+                    if biological and lateral > 0.0 and bio.alpha == 0.0:
+                        var bio_z = (
+                            h2o
+                            + Float64(energy.range_shifter)
+                            + Float64(point.delta_z)
+                        ) * Float64(bio_table.z_scale)
+                        bio = interpolate_bio(bio_table, bio_entries, bio_z)
                     var weighted_fluence = lateral * point.particles
                     result.absorbed_dose += weighted_fluence * depth.dose
                     if biological:
@@ -303,6 +315,27 @@ def clinical_dose_kernel(
                         result.let_mix += weighted_fluence * bio.let_mix
                         result.let_bar += weighted_fluence * bio.let_bar
                         result.let_dm_sum += weighted_fluence * bio.let_dm_sum
+    output[work_index] = result^
+
+
+def reduce_clinical_dose_states_kernel(
+    state_output: UnsafePointer[ClinicalDoseOutputV1, MutAnyOrigin],
+    output: UnsafePointer[ClinicalDoseOutputV1, MutAnyOrigin],
+    voxel_count: Int,
+    state_count: Int,
+):
+    var voxel = global_idx.x
+    if voxel >= voxel_count:
+        return
+    var result = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    for state_index in range(state_count):
+        var value = state_output[state_index * voxel_count + voxel].copy()
+        result.absorbed_dose += value.absorbed_dose
+        result.alpha += value.alpha
+        result.sqrt_beta += value.sqrt_beta
+        result.let_mix += value.let_mix
+        result.let_bar += value.let_bar
+        result.let_dm_sum += value.let_dm_sum
     output[voxel] = result^
 
 
@@ -344,14 +377,10 @@ def compute_clinical_dose_accelerator(
         Int64(view.flags),
         Int64(view.field_count),
         Int64(view.voi_count),
+        Int64(view.state_count),
         Int64(view.dose_grid.nx),
         Int64(view.dose_grid.ny),
         Int64(view.dose_grid.nz),
-        Int64(view.ct_states[0].grid.nx),
-        Int64(view.ct_states[0].grid.ny),
-        Int64(view.ct_states[0].grid.nz),
-        Int64(view.ct_states[0].data_offset),
-        Int64(view.ct_states[0].byte_swap),
     ]
     var floating_metadata: List[Float64] = [
         view.dose_grid.x0,
@@ -363,17 +392,6 @@ def compute_clinical_dose_accelerator(
         view.dose_grid.boundary_x0,
         view.dose_grid.boundary_y0,
         view.dose_grid.boundary_z0,
-        view.ct_states[0].grid.x0,
-        view.ct_states[0].grid.y0,
-        view.ct_states[0].grid.z0,
-        view.ct_states[0].grid.dx,
-        view.ct_states[0].grid.dy,
-        view.ct_states[0].grid.dz,
-        view.ct_states[0].grid.boundary_x0,
-        view.ct_states[0].grid.boundary_y0,
-        view.ct_states[0].grid.boundary_z0,
-        view.ct_states[0].pmod,
-        view.ct_states[0].pore_size,
     ]
 
     var context = DeviceContext()
@@ -389,6 +407,25 @@ def compute_clinical_dose_accelerator(
             * size_of[Int32]() if (view.flags & CLINICAL_DOSE_BIOLOGICAL)
             != UInt32(0) else 0
         ),
+    )
+    var ct_state_device = _copy_bytes_to_device(
+        context,
+        view.ct_states.bitcast[UInt8](),
+        Int(view.state_count) * size_of[ClinicalDoseCTStateV1](),
+    )
+    var state_device = _copy_bytes_to_device(
+        context,
+        view.states.bitcast[UInt8](),
+        (
+            Int(view.state_count) * size_of[ClinicalDoseStateV1]()
+            if view.state_count > UInt32(1)
+            else 0
+        ),
+    )
+    var transformed_device = _copy_bytes_to_device(
+        context,
+        view.transformed_voxels.bitcast[UInt8](),
+        Int(view.transformed_voxel_count) * size_of[ClinicalDosePositionV1](),
     )
     var ct_device = _copy_bytes_to_device(
         context,
@@ -450,6 +487,9 @@ def compute_clinical_dose_accelerator(
         Span(point_runs).unsafe_ptr().bitcast[UInt8](),
         len(point_runs) * size_of[ClinicalDosePointRun](),
     )
+    var state_output_device = context.enqueue_create_buffer[DType.float64](
+        Int(view.grid_voxel_count) * Int(view.state_count) * 6
+    )
     var output_device = context.enqueue_create_buffer[DType.float64](
         Int(view.grid_voxel_count) * 6
     )
@@ -457,6 +497,9 @@ def compute_clinical_dose_accelerator(
         integer_device.unsafe_ptr(),
         floating_device.unsafe_ptr(),
         voi_device.unsafe_ptr().bitcast[Int32](),
+        ct_state_device.unsafe_ptr().bitcast[ClinicalDoseCTStateV1](),
+        state_device.unsafe_ptr().bitcast[ClinicalDoseStateV1](),
+        transformed_device.unsafe_ptr().bitcast[ClinicalDosePositionV1](),
         ct_device.unsafe_ptr().bitcast[Int16](),
         dense_device.unsafe_ptr().bitcast[Float64](),
         grid_field_device.unsafe_ptr().bitcast[ClinicalDoseGridFieldV1](),
@@ -469,7 +512,18 @@ def compute_clinical_dose_accelerator(
         bio_entry_device.unsafe_ptr().bitcast[ClinicalDoseBioEntryV1](),
         run_offset_device.unsafe_ptr().bitcast[UInt32](),
         run_device.unsafe_ptr().bitcast[ClinicalDosePointRun](),
+        state_output_device.unsafe_ptr().bitcast[ClinicalDoseOutputV1](),
+        grid_dim=ceildiv(
+            Int(view.grid_voxel_count) * Int(view.state_count),
+            CLINICAL_DOSE_ACCELERATOR_BLOCK_SIZE,
+        ),
+        block_dim=CLINICAL_DOSE_ACCELERATOR_BLOCK_SIZE,
+    )
+    context.enqueue_function[reduce_clinical_dose_states_kernel](
+        state_output_device.unsafe_ptr().bitcast[ClinicalDoseOutputV1](),
         output_device.unsafe_ptr().bitcast[ClinicalDoseOutputV1](),
+        Int(view.grid_voxel_count),
+        Int(view.state_count),
         grid_dim=ceildiv(
             Int(view.grid_voxel_count), CLINICAL_DOSE_ACCELERATOR_BLOCK_SIZE
         ),

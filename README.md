@@ -16,6 +16,7 @@ canonical local and Hydra paths.
 | NVIDIA FDCB | P101 ten-state, nine-scenario 4D robust plan stops at iteration 120 and writes byte-identical RSTs on H200. |
 | CPU dose | Full static P101 physical/biological cubes match within one/two Float32 output ULPs. |
 | NVIDIA dose | Same complete static case and support validated on H200. |
+| 4D dose | P101 ten-state perfect-rescan physical/biological cubes are byte-identical to `trip_temp` on H200. |
 | AMD | The shared kernels compile for gfx908 with the custom toolchain; queued MI100 runtime validation is not yet a parity claim. |
 | Apple | Kernel lowering has been probed. Runtime validation remains experimental and lowest priority. |
 
@@ -55,8 +56,9 @@ cc -O2 -Iinclude tests/ffi/test_clinical_dose_abi.c -Lbuild \
 build/test_fdcb_abi && build/test_clinical_dose_abi
 ```
 
-Hydra uses one persistently patched `trip_temp` build. Apply
-`integration/trip_temp/trip_temp_mojo.patch` once with Git's
+Hydra uses one persistently patched `trip_temp` build. Apply both
+`integration/trip_temp/trip_temp_mojo.patch` and
+`integration/trip_temp/trip_temp_clinical_dose.patch` once with Git's
 `--ignore-space-change --ignore-whitespace` options because the canonical tree
 contains CRLF files. Use `build_h200.sh` after source changes and submit
 `run_h200_4d.sh` for run-only validation. The runner does not copy or rebuild
@@ -98,13 +100,23 @@ biology tables. Mojo computes Siddon WET, interpolation, divergent
 double-Gaussian transport, and Float64 accumulation. TRiP stores and writes the
 resulting cubes.
 
-The validated dose boundary is static, one CT state, `ms`/`msdb`, physical or
-low-dose biological. `tools/compare_float_cubes.c` reports raw Float32 cube
-support and error without scaling or output shaping.
+The packed boundary supports static and state-major 4D input, `ms`/`msdb`, and
+physical or low-dose biological dose. For 4D, TRiP transforms every reference
+voxel into each state and supplies that state's CT and RST range. Mojo sums raw
+Float64 dose terms in state order; TRiP then performs its unchanged dose
+storage. Static P101 and the ten-state P101 perfect-rescan path are validated.
+`tools/compare_float_cubes.c` reports raw Float32 cube support and error without
+scaling or output shaping.
+
+H200 job 22069 evaluated 41,446 packed reference-grid voxels over ten states and
+20 flattened state fields. Both 39,059,456-voxel output cubes had identical
+11,764-voxel support and were byte-identical to `trip_temp`. `DoseCmd` measured
+10.62 s for Mojo and 8.17 s for `trip_temp`; this small Tumor-only workload is
+currently dominated by packing and accelerator-transfer overhead.
 
 ## Explicit gaps
 
-- 4D clinical-dose deformation and accumulation
+- deformable P101 4D-dose validation and smoothed/per-state dose output
 - robust-RBE and OER models
 - arc fields, lung modulation and specialized LET outputs
 - all-plan, master-field and static-field optimizer modes

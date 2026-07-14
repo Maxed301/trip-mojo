@@ -24,8 +24,9 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
 - Sole TRiP source and CPU truth: the clean local `~/Projects/trip_temp`
   checkout at commit
   `1fb423f`. Hydra's `/lustre/bio/mdick/CUDA/trip_temp` uses that same commit
-  plus only `integration/trip_temp/trip_temp_mojo.patch`, applied once for the
-  persistent headless Mojo-linked build. Never inspect or use `trip4d` or
+  plus only the optimizer and clinical-dose patches under
+  `integration/trip_temp`, applied once for the persistent headless Mojo-linked
+  build. Never inspect or use `trip4d` or
   `trip-gpu`; if `trip_temp` is missing or unsuitable, stop and report that
   problem instead of substituting another tree.
 - Clinical/case inputs on Hydra: `/lustre/bio/mdick/CUDA/TRIP_DATA`. The P101
@@ -66,6 +67,11 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
 - Compare every implementation and benchmark only against `trip_temp` and its
   recorded canonical outputs. Never cite `trip-gpu` or `trip4d` as evidence.
 - Track correctness with objective/chi2, residuals, particle numbers, dose summaries, and relevant dose-volume outputs.
+- The canonical P101 optimizer exec writes a static delivery RST and contains
+  no dose command or deformation field. A 4D dose check must explicitly create
+  state RSTs (currently `perfectrescan`) and load a transform. Require the Mojo
+  log marker to report `states=10`; reloading the saved RST with `file(...)`
+  silently exercises static dose and is not 4D evidence.
 - Never use fudge factors, hidden normalization constants, output shaping, or tolerance loosening to make results look better. These hide bugs and usually indicate missing or incorrect physics, geometry, beam modeling, data parsing, or optimization logic. Any empirical/debug-only scale must be explicitly labeled, isolated, and removed before claiming parity.
 - Do not trade correctness for speed.
 

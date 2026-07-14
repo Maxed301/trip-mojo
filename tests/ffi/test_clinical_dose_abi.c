@@ -16,10 +16,12 @@ _Static_assert(sizeof(ClinicalDoseEnergyV1) == 64, "energy ABI layout");
 _Static_assert(sizeof(ClinicalDoseFieldV1) == 32, "field ABI layout");
 _Static_assert(sizeof(ClinicalDoseGridV1) == 88, "grid ABI layout");
 _Static_assert(sizeof(ClinicalDoseCTStateV1) == 120, "CT state ABI layout");
+_Static_assert(sizeof(ClinicalDoseStateV1) == 8, "state ABI layout");
+_Static_assert(sizeof(ClinicalDosePositionV1) == 24, "position ABI layout");
 _Static_assert(sizeof(ClinicalDoseGridFieldV1) == 184,
                "grid field ABI layout");
 _Static_assert(sizeof(ClinicalDoseOutputV1) == 48, "output ABI layout");
-_Static_assert(sizeof(ClinicalDoseProblemViewV1) == 272,
+_Static_assert(sizeof(ClinicalDoseProblemViewV1) == 296,
                "problem view ABI layout");
 
 int main(void) {
@@ -40,10 +42,10 @@ int main(void) {
     grid_field.window_x0 = grid_field.window_y0 = -10.0f;
     grid_field.window_x1 = grid_field.window_y1 = 10.0f;
     const ClinicalDoseFieldV1 field = {0, 1, 100.0f, 8832.0f, 7806.0f};
-    const ClinicalDoseEnergyV1 energy = {
+    ClinicalDoseEnergyV1 energy = {
         0, 3, 0, 0, 1.0f, 0.0f, -10.0f, 10.0f, -10.0f, 10.0f
     };
-    const ClinicalDosePointV1 points[3] = {
+    ClinicalDosePointV1 points[3] = {
         {0.5f, 0.5f, 0.0f, 100.0f, 10.0},
         {0.5f, 0.5f, 0.0f, 100.0f, 5.0},
         {0.5f, 20.0f, 0.0f, 1.0f, 1.0e9}
@@ -54,7 +56,7 @@ int main(void) {
         {1.0f, 2.0f, 1.0f, 0.0f, 1.0f}
     };
     const ClinicalDoseBioTableV1 bio_table = {0, 2, 1.0f};
-    const ClinicalDoseBioEntryV1 bio_entries[2] = {
+    ClinicalDoseBioEntryV1 bio_entries[2] = {
         {0.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f},
         {1.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}
     };
@@ -124,9 +126,74 @@ int main(void) {
 #else
     assert(trip_clinical_dose_compute_accelerator_v1(&problem, &output, 1) == -3);
 #endif
+    energy.range_shifter = 0.25f;
+    points[0].delta_z = points[1].delta_z = 0.25f;
+    bio_entries[1].alpha = 9.0f;
+    bio_entries[1].sqrt_beta = 10.0f;
+    assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == 0);
+    assert(fabs(output.alpha - fluence * 9.0) < 1.0e-12);
+    assert(fabs(output.sqrt_beta - fluence * 10.0) < 1.0e-12);
+#ifdef FDCB_TEST_REQUIRE_ACCELERATOR
+    assert(trip_clinical_dose_compute_accelerator_v1(
+        &problem, &accelerator_output, 1) == 0);
+    assert(fabs(accelerator_output.alpha - output.alpha) < 1.0e-12);
+    assert(fabs(accelerator_output.sqrt_beta - output.sqrt_beta) < 1.0e-12);
+#endif
+    energy.range_shifter = 0.0f;
+    points[0].delta_z = points[1].delta_z = 0.0f;
+    bio_entries[1].alpha = 3.0f;
+    bio_entries[1].sqrt_beta = 4.0f;
+    const ClinicalDoseCTStateV1 ct_states[2] = {ct_state, ct_state};
+    const ClinicalDoseStateV1 states[2] = {{0, 1}, {1, 1}};
+    ClinicalDoseGridFieldV1 state_grid_fields[2] = {grid_field, grid_field};
+    state_grid_fields[1].field_index = 1;
+    ClinicalDoseFieldV1 state_fields[2] = {field, field};
+    ClinicalDosePositionV1 transformed[2] = {
+        {0.5, 0.5, 0.5}, {0.5, 0.5, 0.5}
+    };
     problem.state_count = 2;
+    problem.ct_states = ct_states;
+    problem.states = states;
+    problem.field_count = 2;
+    problem.grid_fields = state_grid_fields;
+    problem.fields = state_fields;
+    problem.transformed_voxels = transformed;
+    problem.transformed_voxel_count = 2;
+    assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == 0);
+    assert(fabs(output.absorbed_dose - 2.0 * fluence * 2.0) < 1.0e-12);
+#ifdef FDCB_TEST_REQUIRE_ACCELERATOR
+    assert(trip_clinical_dose_compute_accelerator_v1(
+        &problem, &accelerator_output, 1) == 0);
+    assert(fabs(accelerator_output.absorbed_dose - output.absorbed_dose) < 1.0e-12);
+#endif
+    transformed[1].x = 20.0;
+    assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == 0);
+    assert(fabs(output.absorbed_dose - fluence * 2.0) < 1.0e-12);
+#ifdef FDCB_TEST_REQUIRE_ACCELERATOR
+    assert(trip_clinical_dose_compute_accelerator_v1(
+        &problem, &accelerator_output, 1) == 0);
+    assert(fabs(accelerator_output.absorbed_dose - output.absorbed_dose) < 1.0e-12);
+#endif
+    transformed[1].x = 0.5;
+    state_fields[1].energy_offset = 1;
+    state_fields[1].energy_count = 0;
+    assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == 0);
+    assert(fabs(output.absorbed_dose - fluence * 2.0) < 1.0e-12);
+#ifdef FDCB_TEST_REQUIRE_ACCELERATOR
+    assert(trip_clinical_dose_compute_accelerator_v1(
+        &problem, &accelerator_output, 1) == 0);
+    assert(fabs(accelerator_output.absorbed_dose - output.absorbed_dose) < 1.0e-12);
+#endif
+    problem.transformed_voxel_count = 1;
     assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == -1);
     problem.state_count = 1;
+    problem.ct_states = &ct_state;
+    problem.states = NULL;
+    problem.transformed_voxels = NULL;
+    problem.transformed_voxel_count = 0;
+    problem.field_count = 1;
+    problem.grid_fields = &grid_field;
+    problem.fields = &field;
     problem.energy_count = 0;
     assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == -1);
     problem.energy_count = 1;

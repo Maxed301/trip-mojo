@@ -64,6 +64,14 @@ typedef struct {
 } ClinicalDoseCTStateV1;
 
 typedef struct {
+    uint32_t field_offset, field_count;
+} ClinicalDoseStateV1;
+
+typedef struct {
+    double x, y, z;
+} ClinicalDosePositionV1;
+
+typedef struct {
     uint32_t field_index;
     double patient_to_gantry[12];
     double direction[3];
@@ -97,6 +105,11 @@ typedef struct {
     const ClinicalDoseDDDEntryV1 *ddd_entries;
     const ClinicalDoseBioTableV1 *bio_tables;
     const ClinicalDoseBioEntryV1 *bio_entries;
+    /* Empty for static dose. For 4D, state-major positions transformed from
+       the reference dose grid and contiguous field ranges are required. */
+    uint64_t transformed_voxel_count;
+    const ClinicalDoseStateV1 *states;
+    const ClinicalDosePositionV1 *transformed_voxels;
 } ClinicalDoseProblemViewV1;
 
 /* Returns 0 on success, -1 for invalid input, and -2 for output-size mismatch. */

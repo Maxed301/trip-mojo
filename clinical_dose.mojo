@@ -119,6 +119,19 @@ struct ClinicalDoseCTStateV1(Copyable, Movable):
 
 
 @fieldwise_init
+struct ClinicalDoseStateV1(Copyable, Movable):
+    var field_offset: UInt32
+    var field_count: UInt32
+
+
+@fieldwise_init
+struct ClinicalDosePositionV1(Copyable, Movable):
+    var x: Float64
+    var y: Float64
+    var z: Float64
+
+
+@fieldwise_init
 struct ClinicalDoseGridFieldV1(Copyable, Movable):
     var field_index: UInt32
     var m00: Float64
@@ -189,6 +202,11 @@ struct ClinicalDoseProblemViewV1(Copyable, Movable):
     var ddd_entries: UnsafePointer[ClinicalDoseDDDEntryV1, MutExternalOrigin]
     var bio_tables: UnsafePointer[ClinicalDoseBioTableV1, MutExternalOrigin]
     var bio_entries: UnsafePointer[ClinicalDoseBioEntryV1, MutExternalOrigin]
+    var transformed_voxel_count: UInt64
+    var states: UnsafePointer[ClinicalDoseStateV1, MutExternalOrigin]
+    var transformed_voxels: UnsafePointer[
+        ClinicalDosePositionV1, MutExternalOrigin
+    ]
 
 
 @fieldwise_init
@@ -242,10 +260,8 @@ def swap_i16(value: Int16) -> Int16:
 def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
     if view.version != CLINICAL_DOSE_VERSION_V1:
         raise Error("unsupported clinical dose problem version")
-    if view.state_count != UInt32(1):
-        raise Error(
-            "clinical dose V1 CPU currently supports one static CT state"
-        )
+    if view.state_count == UInt32(0):
+        raise Error("clinical dose requires at least one CT state")
     if view.grid_voxel_count == UInt32(0) or view.field_count == UInt32(0):
         raise Error("clinical dose grid and field counts must be nonzero")
     if (
@@ -285,17 +301,36 @@ def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
         raise Error("clinical dose grid dimensions do not match voxel count")
     if view.hlut_count == UInt32(0) or view.ct_value_count == UInt64(0):
         raise Error("clinical dose requires CT and HLUT data")
-    var ct_grid = view.ct_states[0].grid.copy()
-    var ct_end = view.ct_states[0].data_offset + UInt64(ct_grid.nx) * UInt64(
-        ct_grid.ny
-    ) * UInt64(ct_grid.nz)
-    if (
-        ct_grid.nx <= Int32(0)
-        or ct_grid.ny <= Int32(0)
-        or ct_grid.nz <= Int32(0)
-        or ct_end > view.ct_value_count
-    ):
-        raise Error("clinical dose CT state exceeds packed CT data")
+    var four_d = view.state_count > UInt32(1)
+    var expected_transformed = UInt64(view.state_count) * UInt64(
+        view.grid_voxel_count
+    )
+    if four_d and view.transformed_voxel_count != expected_transformed:
+        raise Error("4D clinical dose requires one transformed voxel per state")
+    if not four_d and view.transformed_voxel_count != UInt64(0):
+        raise Error("static clinical dose must not provide transformed voxels")
+    var next_field = UInt64(0)
+    for state_index in range(Int(view.state_count)):
+        var ct_grid = view.ct_states[state_index].grid.copy()
+        var ct_end = view.ct_states[state_index].data_offset + UInt64(
+            ct_grid.nx
+        ) * UInt64(ct_grid.ny) * UInt64(ct_grid.nz)
+        if (
+            ct_grid.nx <= Int32(0)
+            or ct_grid.ny <= Int32(0)
+            or ct_grid.nz <= Int32(0)
+            or ct_end > view.ct_value_count
+        ):
+            raise Error("clinical dose CT state exceeds packed CT data")
+        if four_d:
+            var state = view.states[state_index].copy()
+            if UInt64(state.field_offset) != next_field:
+                raise Error("clinical dose state fields must be contiguous")
+            next_field += UInt64(state.field_count)
+            if next_field > UInt64(view.field_count):
+                raise Error("clinical dose state field range is out of bounds")
+    if four_d and next_field != UInt64(view.field_count):
+        raise Error("clinical dose states do not cover all fields")
     if (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0):
         if view.voi_count == UInt32(0) or view.bio_table_count == UInt32(0):
             raise Error(
@@ -680,6 +715,12 @@ def compute_clinical_dose_voxel[
     energy_run_offsets: UnsafePointer[UInt32, offset_origin],
     point_runs: UnsafePointer[ClinicalDosePointRun, run_origin],
     voxel: Int,
+    state_index: Int,
+    field_offset: Int,
+    field_count: Int,
+    px: Float64,
+    py: Float64,
+    pz: Float64,
 ) -> ClinicalDoseOutputV1:
     var output = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     var biological = (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0)
@@ -688,16 +729,7 @@ def compute_clinical_dose_voxel[
         voi = Int(view.voxel_voi[voxel])
         if voi < 0 or voi >= Int(view.voi_count):
             return output^
-    var nx = Int(view.dose_grid.nx)
-    var ny = Int(view.dose_grid.ny)
-    var ix = voxel % nx
-    var iy = (voxel // nx) % ny
-    var iz = voxel // (nx * ny)
-    var px = view.dose_grid.x0 + Float64(ix) * view.dose_grid.dx
-    var py = view.dose_grid.y0 + Float64(iy) * view.dose_grid.dy
-    var pz = view.dose_grid.z0 + Float64(iz) * view.dose_grid.dz
-
-    for field_local in range(Int(view.field_count)):
+    for field_local in range(field_offset, field_offset + field_count):
         var grid_field = view.grid_fields[field_local].copy()
         if (
             grid_field.gated != Int32(0)
@@ -730,7 +762,7 @@ def compute_clinical_dose_voxel[
         ):
             continue
         var h2o = siddon_h2o(
-            view.ct_states[0],
+            view.ct_states[state_index],
             view.ct_data,
             dense_hlut,
             px,
@@ -762,16 +794,12 @@ def compute_clinical_dose_voxel[
                 continue
             var table = view.ddd_tables[Int(energy.ddd_table)].copy()
             var focus2 = Float64(energy.focus) * Float64(energy.focus)
+            var bio_table = ClinicalDoseBioTableV1(UInt32(0), UInt32(0), 0.0)
             var bio = BioInterpolation(0.0, 0.0, 0.0, 0.0, 0.0)
             if biological:
-                var bio_table = view.bio_tables[
+                bio_table = view.bio_tables[
                     Int(energy.bio_table_offset) + voi
                 ].copy()
-                bio = interpolate_bio(
-                    bio_table,
-                    view.bio_entries,
-                    h2o * Float64(bio_table.z_scale),
-                )
             var last_z = Float64.MAX
             var depth = DDDInterpolation(False, 0.0, 0.0, 0.0, 0.0)
             var energy_index = Int(field.energy_offset) + energy_local
@@ -839,6 +867,15 @@ def compute_clinical_dose_voxel[
                                 * (isig2_1 / CLINICAL_DOSE_PI)
                                 * depth.mix
                             )
+                    if biological and lateral > 0.0 and bio.alpha == 0.0:
+                        var bio_z = (
+                            h2o
+                            + Float64(energy.range_shifter)
+                            + Float64(point.delta_z)
+                        ) * Float64(bio_table.z_scale)
+                        bio = interpolate_bio(
+                            bio_table, view.bio_entries, bio_z
+                        )
                     var weighted_fluence = lateral * point.particles
                     output.absorbed_dose += weighted_fluence * depth.dose
                     if biological:
@@ -893,13 +930,53 @@ def compute_clinical_dose(
         var start = row * Int(view.dose_grid.nx)
         var end = start + Int(view.dose_grid.nx)
         for voxel in range(start, end):
-            output[voxel] = compute_clinical_dose_voxel(
-                view,
-                dense_hlut_pointer,
-                energy_run_offsets_pointer,
-                point_runs_pointer,
-                voxel,
+            var total = ClinicalDoseOutputV1(
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0
             )
+            var nx = Int(view.dose_grid.nx)
+            var ny = Int(view.dose_grid.ny)
+            var ix = voxel % nx
+            var iy = (voxel // nx) % ny
+            var iz = voxel // (nx * ny)
+            var static_x = view.dose_grid.x0 + Float64(ix) * view.dose_grid.dx
+            var static_y = view.dose_grid.y0 + Float64(iy) * view.dose_grid.dy
+            var static_z = view.dose_grid.z0 + Float64(iz) * view.dose_grid.dz
+            for state_index in range(Int(view.state_count)):
+                var field_offset = 0
+                var field_count = Int(view.field_count)
+                var px = static_x
+                var py = static_y
+                var pz = static_z
+                if view.state_count > UInt32(1):
+                    var state = view.states[state_index].copy()
+                    field_offset = Int(state.field_offset)
+                    field_count = Int(state.field_count)
+                    var position = view.transformed_voxels[
+                        state_index * Int(view.grid_voxel_count) + voxel
+                    ].copy()
+                    px = position.x
+                    py = position.y
+                    pz = position.z
+                var state_output = compute_clinical_dose_voxel(
+                    view,
+                    dense_hlut_pointer,
+                    energy_run_offsets_pointer,
+                    point_runs_pointer,
+                    voxel,
+                    state_index,
+                    field_offset,
+                    field_count,
+                    px,
+                    py,
+                    pz,
+                )
+                total.absorbed_dose += state_output.absorbed_dose
+                total.alpha += state_output.alpha
+                total.sqrt_beta += state_output.sqrt_beta
+                total.let_mix += state_output.let_mix
+                total.let_bar += state_output.let_bar
+                total.let_dm_sum += state_output.let_dm_sum
+            output[voxel] = total^
 
     parallelize[compute_row](
         Int(view.dose_grid.nz) * Int(view.dose_grid.ny), max_threads

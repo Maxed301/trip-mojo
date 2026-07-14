@@ -11,11 +11,14 @@ PACK_THREADS="${PACK_THREADS:-16}"
 MOJO_BUILD="${REPO}/build/h200"
 TRIP_BUILD="${TRIP}/build-mojo-h200"
 PATCH="${REPO}/integration/trip_temp/trip_temp_mojo.patch"
+DOSE_PATCH="${REPO}/integration/trip_temp/trip_temp_clinical_dose.patch"
 
 test "$(git -C "${TRIP}" rev-parse HEAD)" = \
   "1fb423f62b76a18b13b4ffd43e8dde55d004e9b5"
 git -C "${TRIP}" apply --reverse --check --ignore-space-change \
   --ignore-whitespace --whitespace=nowarn "${PATCH}"
+git -C "${TRIP}" apply --reverse --check --ignore-space-change \
+  --ignore-whitespace --whitespace=nowarn "${DOSE_PATCH}"
 mkdir -p "${MOJO_BUILD}" "${ROOT}/.tmp" "${ROOT}/.uv-python" \
   "${ROOT}/.ccache-trip-mojo"
 
@@ -42,6 +45,8 @@ apptainer exec -B /lustre:/lustre "${CONTAINER}" env \
     cmake --build '${TRIP_BUILD}' -j'${THREADS}'
     cc -O2 '${REPO}/tools/compare_rst_particles.c' -lm \
       -o '${MOJO_BUILD}/compare_rst_particles'
+    cc -O2 '${REPO}/tools/compare_float_cubes.c' -lm \
+      -o '${MOJO_BUILD}/compare_float_cubes'
   "
 
 stat -c 'artifact %y %s %n' \
