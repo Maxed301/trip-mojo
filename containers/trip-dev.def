@@ -1,0 +1,66 @@
+Bootstrap: localimage
+From: /lustre/bio/mdick/CUDA/cuda_13.0.1-cudnn-devel-ubuntu22.04.sif
+
+%labels
+    Author max/openai
+    Description TRIP CUDA and ROCm development image for Hydra GPU builds
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ccache \
+        cmake \
+        curl \
+        git \
+        gdb \
+        gnupg \
+        less \
+        ninja-build \
+        pkg-config \
+        python3 \
+        python3-pip \
+        rsync \
+        unzip \
+        vim-tiny \
+        wget
+
+    install -d -m 0755 /etc/apt/keyrings
+    wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.4.2 jammy main" \
+        > /etc/apt/sources.list.d/rocm.list
+    printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' \
+        > /etc/apt/preferences.d/rocm-pin-600
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        rocm-hip-runtime \
+        rocm-smi-lib \
+        rocminfo
+
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    mkdir -p /work /scratch /ccache
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export CCACHE_DIR=/ccache
+    export CCACHE_MAXSIZE=20G
+    export ROCM_PATH=/opt/rocm
+    export PATH=/usr/lib/ccache:/usr/local/bin:/usr/local/cuda/bin:/opt/rocm/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:$LD_LIBRARY_PATH
+
+%runscript
+    exec "$@"
+
+%help
+    TRIP CUDA and ROCm development container for Hydra.
+
+    NVIDIA:
+      apptainer exec --nv trip-dev.sif bash
+
+    AMD:
+      apptainer exec --rocm trip-dev.sif bash
