@@ -20,6 +20,8 @@ CONTAINER="${CONTAINER:-${ROOT}/trip-dev.sif}"
 UV="${UV:-${ROOT}/bin/uv}"
 THREADS="${THREADS:-12}"
 GPU_TARGET="${GPU_TARGET:-sm_90a}"
+GPU_MEMORY_CHUNK_PERCENT="${GPU_MEMORY_CHUNK_PERCENT:-10}"
+GPU_MEMORY_SIZE_PERCENT="${GPU_MEMORY_SIZE_PERCENT:-10}"
 JOB_ID="${SLURM_JOB_ID:-manual}"
 BUILD_DIR="${BUILD_DIR:-${REPO}/build/h200-${JOB_ID}}"
 RUN_LOG="${PROFILES}/mojo_h200_${JOB_ID}.log"
@@ -38,6 +40,8 @@ echo "uv=${UV}"
 echo "commit=$(git rev-parse HEAD)"
 echo "dirty_files=$(git status --porcelain | wc -l)"
 echo "gpu_target=${GPU_TARGET}"
+echo "gpu_memory_chunk_percent=${GPU_MEMORY_CHUNK_PERCENT}"
+echo "gpu_memory_size_percent=${GPU_MEMORY_SIZE_PERCENT}"
 echo "threads=${THREADS}"
 echo "build_dir=${BUILD_DIR}"
 echo "run_log=${RUN_LOG}"
@@ -60,6 +64,8 @@ time -p apptainer exec --nv -B /lustre:/lustre \
   "${CONTAINER}" env \
     REPO="${REPO}" BUILD_DIR="${BUILD_DIR}" UV="${UV}" \
     THREADS="${THREADS}" GPU_TARGET="${GPU_TARGET}" \
+    MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_CHUNK_PERCENT="${GPU_MEMORY_CHUNK_PERCENT}" \
+    MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT="${GPU_MEMORY_SIZE_PERCENT}" \
     UV_CACHE_DIR="${ROOT}/.uv-cache" \
     UV_PYTHON_INSTALL_DIR="${UV_PYTHON_DIR}" TMPDIR="${TMPDIR}" \
     bash --noprofile --norc -lc '

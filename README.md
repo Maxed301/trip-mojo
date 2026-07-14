@@ -227,10 +227,13 @@ slice-gradient scale to Float32 while Mojo retains the required Float64
 reference gradient. A subsequent complete P101 run on H200 accepted iteration
 271, stopped on the same chi2 increase, and produced byte-identical RST files
 for both fields. The Mojo accelerator ABI took 10.05 s versus 70.97 s for
-unmodified `trip_temp` on the same server. Peak device allocation was about
-129 GiB despite about 8.7 GiB of irreducible packed problem data, so reducing
-accelerator workspace and allocation retention is the next GPU performance
-and portability priority.
+unmodified `trip_temp` on the same server. The live device-buffer footprint was
+8.51 GiB: 1.21 GiB of indices, 6.47 GiB of coefficients, and the remaining
+workspaces. Mojo's default memory manager initially reserved about 129 GiB of
+the H200, although that memory was not live problem data. The supplied H200
+runner caps the allocator arena at 10% and uses 10% growth chunks. A repeated
+full optimization then peaked at 14,875 MiB, retained the 10.03 s optimizer
+time, stopped at iteration 271, and again produced byte-identical RST files.
 
 Shared accelerator kernels keep the packed matrix resident,
 perform sparse slice dots with Float64 warp/wave reductions, accumulate the five
