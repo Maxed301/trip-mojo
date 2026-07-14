@@ -75,6 +75,12 @@ library is built with `-D FDCB_ABI_ACCELERATOR=true` and an accelerator target;
 otherwise it returns `-3`. The packed view and output layout are identical for
 both entry points.
 
+Clinical dose follows the same explicit selection rule:
+`trip_clinical_dose_compute_v1` remains the CPU reference entry point and
+`trip_clinical_dose_compute_accelerator_v1` uses the shared accelerator backend
+or returns `-3` when that backend was not compiled. Both consume the same
+`ClinicalDoseProblemViewV1` and produce the same Float64 output records.
+
 The C views are fail-closed about numeric mode. The host must identify FDCB,
 `ms` or `msdb`, no biology or low-dose biology, and the effective CPU thread
 count. A mismatched algorithm, biology model, precision mode, thread count, or
@@ -151,38 +157,38 @@ schedule preserved byte-identical RSTs but improved the best runtime by only
 
 For a faithful dose-only comparison, both implementations read the same two
 optimized RST files and use the same 12-thread P101 setup. Unmodified
-`trip_temp` took 110.11 s for `DoseCmd`. Two repeated Mojo runs took
-53.70--53.76 s in the numeric kernel and 55.91--55.96 s for the command, about
-49% faster end to end. Hardware-counter profiling showed low cache and
-branch-miss rates; about 30% of the original Mojo cycles were in its native
-Float64 exponential. Calling the platform `libm exp`, which is also what the
-TRiP CPU reference calls, reduced the kernel from 90.34 s to 62.62 s without an
-approximation or precision-mode change. Profiling the remaining kernel showed
-that point traversal dominated, at 1.95 instructions per cycle with 0.78%
-branch misses and 0.30% last-level cache misses. An in-memory raster-row index
-rejects whole out-of-support rows while preserving the original contributing
-point order; finer row scheduling also reduces tail imbalance. Together they
-reduced the measured kernel to about 53.7 s. CPU shared-library builds pass
-`-Xlinker -lm` so this dependency is explicit.
+`trip_temp` took 109.20 s for `DoseCmd`. The current all-Float64 Mojo reference
+path took 61.11 s in the numeric kernel and 63.29 s for the command, about 42%
+faster end to end. Hardware-counter profiling showed low cache and branch-miss
+rates; about 30% of the original Mojo cycles were in its native Float64
+exponential. Calling the platform `libm exp`, which is also what the TRiP CPU
+reference calls, removed that bottleneck without an approximation or
+precision-mode change. Profiling then showed that point traversal dominated,
+at 1.95 instructions per cycle with 0.78% branch misses and 0.30% last-level
+cache misses. An in-memory raster-row index rejects whole out-of-support rows
+while preserving the original contributing point order; finer row scheduling
+also reduces tail imbalance. CPU shared-library builds pass `-Xlinker -lm` so
+the platform-math dependency is explicit.
 
 The clinical-dose boundary keeps CT, VOI selection, field/RST preparation, RBE
 tables, normalization, cube storage, and output in TRiP. Mojo receives the flat
 prepared grid, CT/HLUT data, transforms, raster points, DDD tables, and biology
 tables. It computes Siddon WET, DDD and biology interpolation, divergent
 double-Gaussian transport, and Float64 physical/biological accumulation over
-dose-grid row work units. Raster particle numbers and all accumulators are
-Float64; compact geometry and static tables are Float32.
+dose-grid row work units. The reference ABI keeps geometry, static tables,
+particle numbers, and accumulators in Float64; any later mixed32 dose mode must
+be explicit and may not alter this reference path.
 
-Using those same RST files, the complete 512 x 512 x 149 physical cube differs
-by 9.71e-7 relative L2 with 7.73e-5 Gy maximum absolute error. The biological
-cube differs by 7.51e-7 relative L2 with 2.89e-4 Gy maximum absolute error.
-Both implementations have the same 1,656,379 nonzero voxels. Switching from
-Mojo's native exponential to TRiP's platform `libm exp` changed the stored
-Float32 cubes by at most one output ULP. No output scaling, tolerance change,
-or shaping is applied. The current CPU entry point deliberately supports the
-validated static one-CT-state `ms`/`msdb` physical and low-dose biological
-path. 4D deformation/state output, OER, arc fields, lung modulation, and
-specialized LET outputs remain explicit parity gaps.
+Using the byte-identical optimized RST files, the complete 512 x 512 x 149
+physical cube differs from fresh `trip_temp` output by 5.88e-11 relative L2
+with 1.49e-8 Gy maximum absolute error. The biological cube differs by 3.53e-11
+relative L2 with 2.98e-8 Gy maximum absolute error. Both have exactly the same
+1,654,902 nonzero voxels. These maxima are one and two Float32 output ULPs; no
+output scaling, tolerance change, or shaping is applied. The current CPU entry
+point deliberately supports the validated static one-CT-state `ms`/`msdb`
+physical and low-dose biological path. 4D deformation/state output, OER, arc
+fields, lung modulation, and specialized LET outputs remain explicit parity
+gaps.
 
 `tools/compare_float_cubes.c` compares raw Float32 dose cubes without a
 tolerance or output shaping and reports nonzero support, relative L2 error, and
@@ -208,7 +214,7 @@ With `complexminp` enabled, deletion decisions, deletion count, and final
 particles match. `trip-gpu`'s result counter omits failed first draws; Mojo
 reports every RNG draw actually consumed.
 
-A production-data NVIDIA comparison uses an in-memory 23,000-voxel slice of
+A production-data NVIDIA comparison first used an in-memory 23,000-voxel slice of
 P101 with 9 robust scenarios, 40,889 particle variables, 9,936,000 slices, and
 563,162,639 coefficients. The current `trip-gpu` direct entry point must first
 run dose/gradient once: otherwise it invokes exact-step reduction with
@@ -218,9 +224,13 @@ regression fix deletes the same 20 spots; update-9 chi2 differs by
 1.93e-8, particle RMS by 1.87e-5, and maximum particle number by 2.11e-4.
 Longer trajectories separate because `trip-gpu` quantizes every
 slice-gradient scale to Float32 while Mojo retains the required Float64
-reference gradient. The Float64 reference problem now needs about 8.7 GiB of
-resident buffers, but the local display-attached 6 GiB device exposes only 5.13
-GiB free, so a full-device production run remains pending on larger hardware.
+reference gradient. A subsequent complete P101 run on H200 accepted iteration
+271, stopped on the same chi2 increase, and produced byte-identical RST files
+for both fields. The Mojo accelerator ABI took 10.05 s versus 70.97 s for
+unmodified `trip_temp` on the same server. Peak device allocation was about
+129 GiB despite about 8.7 GiB of irreducible packed problem data, so reducing
+accelerator workspace and allocation retention is the next GPU performance
+and portability priority.
 
 Shared accelerator kernels keep the packed matrix resident,
 perform sparse slice dots with Float64 warp/wave reductions, accumulate the five
@@ -256,3 +266,18 @@ does not narrow or alter the packed V1/C ABI contract. A future policy-specific
 fast path may move updates for cases without
 `complexminp`; VOI processing, `.exec` expansion, and replay/export files remain
 outside this backend.
+
+The clinical-dose accelerator maps independent prepared dose-grid voxels to
+device threads and stages the packed V1 records byte-for-byte. Grid and beam
+geometry, HLUT, DDD and biology tables, Siddon WET, divergent double-Gaussian
+transport, and all six output accumulators remain Float64. On the complete P101
+direct-dose workload, the NVIDIA output has exact nonzero support versus a fresh
+`trip_temp` run; physical and biological relative L2 differences are
+`5.88e-11` and `3.53e-11`, with maxima of one and two Float32 output ULPs. On
+H200 the kernel took 11.49--11.54 s and 11.75 s including packing and output
+copy; the full TRiP dose command took 15.52--19.31 s, versus 236.39 s for the
+unmodified CPU reference on the server. The focused physical and biological C
+ABI cases pass on NVIDIA sm_75, and the complete P101 case passes on sm_90a.
+The shared code compiles for AMD gfx942, but the pinned Mojo compiler rejects
+MI100's gfx908 target, so MI100 runtime support remains a toolchain limitation
+rather than a claimed backend.

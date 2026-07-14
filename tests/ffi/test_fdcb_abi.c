@@ -111,7 +111,11 @@ int main(void) {
     assert(accelerator_result.iterations == 7);
     assert(isfinite(accelerator_result.chi2));
 #else
+#ifdef FDCB_TEST_REQUIRE_ACCELERATOR
+    assert(accelerator_status == 0);
+#else
     assert(accelerator_status == 0 || accelerator_status == -3);
+#endif
     if (accelerator_status == 0) {
         double scale = fabs(result.chi2) > 1.0 ? fabs(result.chi2) : 1.0;
         assert(accelerator_result.iterations == result.iterations);

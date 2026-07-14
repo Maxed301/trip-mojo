@@ -5,6 +5,7 @@ from std.memory import OpaquePointer, UnsafePointer
 from std.sys import get_defined_bool, get_defined_int
 
 from clinical_dose import ClinicalDoseOutputV1, clinical_dose_compute_abi_v1
+from clinical_dose_accelerator import clinical_dose_compute_accelerator_abi_v1
 
 from fdcb_optimize import (
     FDCBOptimizationResult,
@@ -27,9 +28,7 @@ from fdcb_problem import (
 comptime FDCB_ABI_ACCELERATOR = get_defined_bool[
     "FDCB_ABI_ACCELERATOR", False
 ]()
-comptime FDCB_ABI_COPY_THREADS = get_defined_int[
-    "FDCB_CPU_THREADS", 12
-]()
+comptime FDCB_ABI_COPY_THREADS = get_defined_int["FDCB_CPU_THREADS", 12]()
 comptime FDCB_OPTIMIZER_FDCB = UInt32(1)
 comptime FDCB_DOSE_MS = UInt32(1)
 comptime FDCB_DOSE_MSDB = UInt32(2)
@@ -44,9 +43,21 @@ def trip_clinical_dose_compute_v1(
     output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
     output_count: UInt64,
 ) -> Int32:
-    return clinical_dose_compute_abi_v1(
-        problem_pointer, output, output_count
-    )
+    return clinical_dose_compute_abi_v1(problem_pointer, output, output_count)
+
+
+@export("trip_clinical_dose_compute_accelerator_v1", ABI="C")
+def trip_clinical_dose_compute_accelerator_v1(
+    problem_pointer: OpaquePointer[MutExternalOrigin],
+    output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
+    output_count: UInt64,
+) -> Int32:
+    comptime if FDCB_ABI_ACCELERATOR:
+        return clinical_dose_compute_accelerator_abi_v1(
+            problem_pointer, output, output_count
+        )
+    else:
+        return Int32(-3)
 
 
 @fieldwise_init
@@ -206,7 +217,8 @@ def trip_fdcb_evaluate_v1(
             result.residual_percent(),
         )
         return Int32(0)
-    except:
+    except error:
+        print("FDCB evaluate ABI error:", error)
         return Int32(-1)
 
 
@@ -278,14 +290,18 @@ def optimize_v1[
             UInt32(0),
         )
         return Int32(0)
-    except:
+    except error:
+        print("FDCB optimize ABI error:", error)
         return Int32(-1)
 
 
 def copy_problem(view: ABIProblemView) raises -> FDCBProblemV1:
     if view.optimizer_algorithm != FDCB_OPTIMIZER_FDCB:
         raise Error("FDCB ABI accepts only the FDCB optimizer")
-    if view.dose_algorithm != FDCB_DOSE_MS and view.dose_algorithm != FDCB_DOSE_MSDB:
+    if (
+        view.dose_algorithm != FDCB_DOSE_MS
+        and view.dose_algorithm != FDCB_DOSE_MSDB
+    ):
         raise Error("FDCB ABI accepts only ms and msdb sparse matrices")
     var biological = (view.flags & FDCB_FLAG_BIOLOGICAL) != UInt32(0)
     if biological and view.biology_model != FDCB_BIOLOGY_LOW_DOSE:
@@ -398,9 +414,7 @@ def copy_problem(view: ABIProblemView) raises -> FDCBProblemV1:
         indices[i] = view.coefficient_point_indices[i]
         coefficients[i] = view.coefficients[i]
 
-    parallelize[
-        copy_coefficient
-    ](len(coefficients), FDCB_ABI_COPY_THREADS)
+    parallelize[copy_coefficient](len(coefficients), FDCB_ABI_COPY_THREADS)
     var settings = FDCBSettingsV1(
         view.flags,
         view.precision_mode,

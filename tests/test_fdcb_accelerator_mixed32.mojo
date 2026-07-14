@@ -16,6 +16,8 @@ def assert_mixed32_close(actual: Float64, expected: Float64) raises:
 
 
 def main() raises:
+    comptime assert has_accelerator(), "accelerator test requires a GPU"
+    comptime assert FDCB_ACCELERATOR_MIXED32, "mixed32 mode is required"
     comptime if has_accelerator() and FDCB_ACCELERATOR_MIXED32:
         var problem = build_biological_problem(0.02)
         var expected = evaluate_packed_biological_fdcb(
@@ -49,3 +51,4 @@ def main() raises:
         assert_mixed32_close(actual.dose_max[0], expected_physical.dose_max[0])
         assert_mixed32_close(actual.chi2(), expected_physical.chi2)
         assert_mixed32_close(actual.gradient[0], expected_physical.gradient[0])
+        print("test_fdcb_accelerator_mixed32: PASS")

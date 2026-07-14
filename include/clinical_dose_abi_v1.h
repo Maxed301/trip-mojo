@@ -18,12 +18,11 @@ enum {
 };
 
 typedef struct {
-    float x, y, delta_z, f2_max;
-    double particles;
+    double x, y, delta_z, f2_max, particles;
 } ClinicalDosePointV1;
 
 typedef struct {
-    float z_cm, dose, fwhm1, mix, fwhm2;
+    double z_cm, dose, fwhm1, mix, fwhm2;
 } ClinicalDoseDDDEntryV1;
 
 typedef struct {
@@ -31,23 +30,23 @@ typedef struct {
 } ClinicalDoseDDDTableV1;
 
 typedef struct {
-    float z_cm, alpha, sqrt_beta, let_mix, let_bar, let_dm_sum;
+    double z_cm, alpha, sqrt_beta, let_mix, let_bar, let_dm_sum;
 } ClinicalDoseBioEntryV1;
 
 typedef struct {
     uint32_t entry_offset, entry_count;
-    float z_scale;
+    double z_scale;
 } ClinicalDoseBioTableV1;
 
 typedef struct {
     uint32_t point_offset, point_count, ddd_table, bio_table_offset;
-    float focus, range_shifter;
-    float window_x0, window_x1, window_y0, window_y1;
+    double focus, range_shifter;
+    double window_x0, window_x1, window_y0, window_y1;
 } ClinicalDoseEnergyV1;
 
 typedef struct {
     uint32_t energy_offset, energy_count;
-    float dose_extension2, scanner_x, scanner_y;
+    double dose_extension2, scanner_x, scanner_y;
 } ClinicalDoseFieldV1;
 
 typedef struct {
@@ -66,10 +65,10 @@ typedef struct {
 
 typedef struct {
     uint32_t field_index;
-    float patient_to_gantry[12];
-    float direction[3];
-    float off_h2o, bolus;
-    float window_x0, window_x1, window_y0, window_y1;
+    double patient_to_gantry[12];
+    double direction[3];
+    double off_h2o, bolus;
+    double window_x0, window_x1, window_y0, window_y1;
     int32_t gated;
 } ClinicalDoseGridFieldV1;
 
@@ -89,7 +88,7 @@ typedef struct {
     const int32_t *voxel_voi;
     const ClinicalDoseCTStateV1 *ct_states;
     const int16_t *ct_data;
-    const float *hlut_x, *hlut_y;
+    const double *hlut_x, *hlut_y;
     const ClinicalDoseGridFieldV1 *grid_fields;
     const ClinicalDoseFieldV1 *fields;
     const ClinicalDoseEnergyV1 *energies;
@@ -102,6 +101,13 @@ typedef struct {
 
 /* Returns 0 on success, -1 for invalid input, and -2 for output-size mismatch. */
 int32_t trip_clinical_dose_compute_v1(
+    const ClinicalDoseProblemViewV1 *problem,
+    ClinicalDoseOutputV1 *output,
+    uint64_t output_count
+);
+
+/* Same contract on the shared accelerator backend; -3 if not compiled in. */
+int32_t trip_clinical_dose_compute_accelerator_v1(
     const ClinicalDoseProblemViewV1 *problem,
     ClinicalDoseOutputV1 *output,
     uint64_t output_count

@@ -381,6 +381,7 @@ def test_accelerator_metric_reduction_crosses_blocks() raises:
 
 
 def main() raises:
+    comptime assert has_accelerator(), "accelerator test requires a GPU"
     comptime if has_accelerator():
         test_accelerator_slice_dots_match_cpu()
         test_accelerator_biological_evaluation_matches_cpu()
@@ -391,3 +392,4 @@ def main() raises:
         test_accelerator_full_iterations_match_cpu()
         test_accelerator_physical_iterations_match_cpu()
         test_accelerator_metric_reduction_crosses_blocks()
+        print("test_fdcb_accelerator: PASS")
