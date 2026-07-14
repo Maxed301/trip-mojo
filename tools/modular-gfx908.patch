@@ -1,0 +1,116 @@
+diff --git a/bazel/common.MODULE.bazel b/bazel/common.MODULE.bazel
+index 1a3c5c80..530473f1 100644
+--- a/bazel/common.MODULE.bazel
++++ b/bazel/common.MODULE.bazel
+@@ -293,6 +294,7 @@ mojo.gpu_toolchains(
+         "MI325": "mi325",
+         "MI355": "mi355",
+         "MI250X": "gfx90a",
++        "MI100": "mi100",
+         "Navi 31": "W7900",
+         "Navi 31 [Radeon Pro W7900]": "W7900",
+         "AMD Radeon RX 6900 XT": "rx6900xt",
+@@ -319,6 +321,7 @@ mojo.gpu_toolchains(
+         "h200": "nvidia:sm_90a",
+         "l4": "nvidia:sm_89",
+         "gfx90a": "amdgpu:gfx90a",
++        "mi100": "amdgpu:gfx908",
+         "mi300x": "amdgpu:gfx942",
+         "mi325": "amdgpu:gfx942",
+         "mi355": "amdgpu:gfx950",
+diff --git a/mojo/stdlib/std/gpu/host/info.mojo b/mojo/stdlib/std/gpu/host/info.mojo
+index 40303465..21b53434 100644
+--- a/mojo/stdlib/std/gpu/host/info.mojo
++++ b/mojo/stdlib/std/gpu/host/info.mojo
+@@ -126,6 +126,15 @@ comptime NvidiaBlackwellConsumerFamily = AcceleratorArchitectureFamily(
+ """NVIDIA Blackwell consumer architecture family (sm_120)."""
+ 
+ # AMD Architecture Families
++comptime AMDCDNA1Family = AcceleratorArchitectureFamily(
++    warp_size=64,
++    threads_per_multiprocessor=64 * 32,
++    shared_memory_per_multiprocessor=64 * _KB,
++    max_registers_per_block=64 * _K,
++    max_thread_block_size=_K,
++)
++"""AMD CDNA1 architecture family (gfx908)."""
++
+ comptime AMDCDNA2Family = AcceleratorArchitectureFamily(
+     warp_size=64,
+     threads_per_multiprocessor=64 * 32,
+@@ -1283,6 +1292,37 @@ comptime RTX2060 = GPUInfo.from_family(
+ """NVIDIA RTX 2060 GPU configuration."""
+ 
+ 
++# ===-----------------------------------------------------------------------===#
++# MI100
++# ===-----------------------------------------------------------------------===#
++
++
++def _get_mi100_target() -> _TargetType:
++    """Creates an MLIR target configuration for AMD MI100 GPU."""
++    return __mlir_attr[
++        `#kgen.target<triple = "amdgcn-amd-amdhsa", `,
++        `arch = "gfx908", `,
++        `features = "", `,
++        `data_layout = "e-m:e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",`,
++        `index_bit_width = 64,`,
++        `simd_bit_width = 128`,
++        `> : !kgen.target`,
++    ]
++
++
++comptime MI100 = GPUInfo.from_family(
++    family=AMDCDNA1Family,
++    name="MI100",
++    vendor=Vendor.AMD_GPU,
++    api="hip",
++    arch_name="gfx908",
++    compute=9.0,
++    version="CDNA1",
++    sm_count=120,
++)
++"""AMD MI100 GPU configuration."""
++
++
+ # ===-----------------------------------------------------------------------===#
+ # MI250X
+ # ===-----------------------------------------------------------------------===#
+@@ -1775,6 +1815,8 @@ struct GPUInfo(Equatable, RegisterPassable, Writable):
+             return _get_rtx5090_target()
+         if self.name == "Jetson Thor":
+             return _get_jetson_thor_target()
++        if self.name == "MI100":
++            return _get_mi100_target()
+         if self.name == "MI250X":
+             return _get_mi250x_target()
+         if self.name == "MI300X":
+@@ -2040,6 +2082,7 @@ comptime _all_targets = (
+     StaticString("sm_120a"),
+     StaticString("sm_121"),
+     StaticString("sm_121a"),
++    StaticString("gfx908"),
+     StaticString("gfx90a"),
+     StaticString("gfx942"),
+     StaticString("gfx950"),
+@@ -2092,10 +2135,10 @@ def _get_info_from_target[target_arch0: StaticString]() -> GPUInfo:
+         .replace("sm", "sm_")
+         .replace("sm__", "sm_")
+         # AMD normalization
++        .replace("mi100", "gfx908")
+         .replace("mi250x", "gfx90a")
+         .replace("mi300x", "gfx942")
+         .replace("mi355x", "gfx950")
+-        .replace("gfx90", "gfx90a")
+         .replace("amdgpu:", "")
+         # Apple normalization, general "metal:" → "apple-m" replacement.
+         .replace("metal:", "apple-m")
+@@ -2138,6 +2181,8 @@ def _get_info_from_target[target_arch0: StaticString]() -> GPUInfo:
+     elif target_arch == "sm_121" or target_arch == "sm_121a":
+         return materialize[DGXSpark]()
+     # AMD (gfx IDs; "mi250x"/"mi300x"/"mi355x" aliases are normalized above)
++    elif target_arch == "gfx908":
++        return materialize[MI100]()
+     elif target_arch == "gfx90a":
+         return materialize[MI250X]()
+     elif target_arch == "gfx942":

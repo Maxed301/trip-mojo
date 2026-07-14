@@ -281,6 +281,9 @@ H200 the kernel took 11.49--11.54 s and 11.75 s including packing and output
 copy; the full TRiP dose command took 15.52--19.31 s, versus 236.39 s for the
 unmodified CPU reference on the server. The focused physical and biological C
 ABI cases pass on NVIDIA sm_75, and the complete P101 case passes on sm_90a.
-The shared code compiles for AMD gfx942, but the pinned Mojo compiler rejects
-MI100's gfx908 target, so MI100 runtime support remains a toolchain limitation
-rather than a claimed backend.
+The stock pinned Mojo compiler rejects MI100's gfx908 target. A custom Modular
+source build now adds the CDNA1 target and successfully compiles both a device
+probe and the trip-mojo accelerator tests for gfx908. The first Hydra jobs
+reached the MI100 but failed while loading `libamdhip64.so` inside the container;
+MI100 execution is therefore pending ROCm runtime wiring, not code generation.
+Build and runner details are in [docs/mi100.md](docs/mi100.md).

@@ -30,6 +30,9 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
 - Use current Mojo syntax and idioms.
 - Prefer Mojo-native code over inline Python. Do not add inline Python or Python interop for parsing, file I/O, setup, validation, reporting, math, or tests; implement those pieces natively in Mojo.
 - GPU code must be Mojo-native, not CUDA-shaped code translated mechanically.
+- The pinned Mojo package does not expose gfx908. MI100 work uses the custom
+  Modular source build with the added CDNA1/gfx908 target; distinguish compiler
+  support from ROCm container/runtime availability in status reports.
 - Keep parsing, file I/O, setup, VOI ownership, and reporting in TRiP's existing CPU control plane.
 - Put GPU effort into dose accumulation, objective/residual evaluation, gradient/backprojection, spot updates, and reductions.
 - Maintain a CPU backend as the correctness/debug reference.
