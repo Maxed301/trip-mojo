@@ -1,0 +1,184 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -171,11 +171,21 @@ SET(most_sources
+ )
+ 
+ add_definitions(-DTRIPFLY_TIMEOUTPUT)
++add_definitions(-DCMD_HEADLESS)
+ 
+ add_library(TRiP98-64 STATIC ${most_sources} ${all_headers})
+ # ADD_EXECUTABLE(TRiP98 ${all_sources} ${all_headers})
+ ADD_EXECUTABLE(TRiP98 trp.c)
+-TARGET_LINK_LIBRARIES(TRiP98 TRiP98-64 ${CMD2KX_LIBRARIES} ${M2KX_LIBRARIES} ${U2KX_LIBRARIES} m Xt X11 dl OpenMP::OpenMP_C)
++TARGET_LINK_LIBRARIES(TRiP98 TRiP98-64 ${CMD2KX_LIBRARIES} ${M2KX_LIBRARIES} ${U2KX_LIBRARIES} m dl OpenMP::OpenMP_C)
++set(TRIP_MOJO_ROOT "" CACHE PATH "Path to trip-mojo")
++set(TRIP_MOJO_LIBRARY "" CACHE FILEPATH "Path to libtrip_fdcb_mojo")
++if(NOT TRIP_MOJO_ROOT OR NOT TRIP_MOJO_LIBRARY)
++  message(FATAL_ERROR "TRIP_MOJO_ROOT and TRIP_MOJO_LIBRARY are required")
++endif()
++target_include_directories(TRiP98-64 PRIVATE
++  "${TRIP_MOJO_ROOT}/include"
++  "${TRIP_MOJO_ROOT}/integration/trip_temp")
++target_link_libraries(TRiP98 "${TRIP_MOJO_LIBRARY}")
+ 
+ install(TARGETS TRiP98 DESTINATION "$ENV{HOME}/bin")
+ install(TARGETS TRiP98-64 DESTINATION "$ENV{HOME}/Libraries")
+diff --git a/Libraries/MKLibs/CMD2KX/CMakeLists.txt b/Libraries/MKLibs/CMD2KX/CMakeLists.txt
+--- a/Libraries/MKLibs/CMD2KX/CMakeLists.txt
++++ b/Libraries/MKLibs/CMD2KX/CMakeLists.txt
+@@ -1,5 +1,6 @@
+ cmake_minimum_required(VERSION 3.0)
+ project(CMD2KX)
++add_definitions(-DCMD_HEADLESS)
+ 
+ SET( CMAKE_C_COMPILER gcc)
+ SET( CMAKE_C_STANDARD 11)
+diff --git a/Libraries/MKLibs/CMD2KX/cmd.c b/Libraries/MKLibs/CMD2KX/cmd.c
+--- a/Libraries/MKLibs/CMD2KX/cmd.c
++++ b/Libraries/MKLibs/CMD2KX/cmd.c
+@@ -384,6 +384,7 @@ int CmdExec( struct SCMD *psCmd,
+    
+    } 
+ #elif defined(CMDUNIX)
++#if !defined(CMD_HEADLESS)
+    if ( psCmd -> uiFlag & CMDFLAG_GUI ) {   
+       XEvent xEvent;
+       
+@@ -405,7 +406,9 @@ int CmdExec( struct SCMD *psCmd,
+          break; 
+          } 
+       }       
+-   } else {
++   } else
++#endif
++   {
+                                              /* disable interrupt */
+ #ifdef WITHOUT_CTRLC
+       eOldBreak = signal( SIGINT, SIG_IGN );
+diff --git a/Libraries/MKLibs/CMD2KX/cmd.h b/Libraries/MKLibs/CMD2KX/cmd.h
+--- a/Libraries/MKLibs/CMD2KX/cmd.h
++++ b/Libraries/MKLibs/CMD2KX/cmd.h
+@@ -66,7 +66,7 @@ extern "C" {
+    some platform specific definitions ...
+ */
+                                       /* special for X ... */
+-#if defined(CMDUNIX)
++#if defined(CMDUNIX) && !defined(CMD_HEADLESS)
+ 
+ #include <X11/Xlib.h>
+ #include <X11/Xutil.h>
+@@ -89,6 +89,12 @@ struct SCMDX {
+    Widget wdgMain;                    /**< main widget */
+    XtAppContext xtApp;                /**< app context */
+ };
++#elif defined(CMDUNIX)
++struct SCMDX {
++   void *wdgTop;
++   void *wdgMain;
++   void *xtApp;
++};
+ #endif
+                                       /* special for PM ... */
+ #if defined(__EMX__)
+diff --git a/trpvoi.c b/trpvoi.c
+--- a/trpvoi.c
++++ b/trpvoi.c
+@@ -24,6 +24,7 @@
+ #include "vdxfile.h"
+ 
+ #include "trpvoi.h"
++#include <stddef.h>
+ #include "trptrafo.h"
+ #include "trpct.h"
+ #undef VOIMAN
+diff --git a/trpopt.c b/trpopt.c
+--- a/trpopt.c
++++ b/trpopt.c
+@@ -28,6 +28,8 @@
+ #include "trpmlut.h"
+ #include "trpcube.h"
+ #include "trptomo.h"
++#include "fdcb_mojo_optimizer_bridge.inc"
++#include "fdcb_mojo_matrix_bridge.inc"
+ 
+ #define TRPOPTGRAD_TESTGRADINFO
+ 
+@@ -1312,7 +1314,8 @@ int TRPOptRun( struct STRPOPT      *psOpt,
+             sCE.iRC = iRC &~ CMDERR_MASK; goto gError;
+          }
+       }
+-      if(psOpt->ulFlag & TRPOPT_COMPLEXMINPART) {
++      if((psOpt->ulFlag & TRPOPT_COMPLEXMINPART) &&
++         !(getenv("TRIP_FDCB_MOJO") && gFDCBMojoFinalMinimumApplied)) {
+          // eliminate any left-over points not meeting the min particle criterion
+          for(int iF=0;iF < psOpt->nF; ++iF) {
+             if(psOpt->psOF[iF].psF->psMasterField == NULL) {
+@@ -1669,7 +1672,9 @@ int TRPOptOptimize ( struct STRPOPT *psOpt,
+       break;
+       case TRPOPTALG_FDCB:  
+          fprintf( stderr, "<D> optfr with FDCB ...\n" );
+-         if (iAdaptiveLoop==0) {
++         if ( getenv("TRIP_FDCB_MOJO") ) {
++            iRC = TRPOptFDCBMojoRun(psOpt, psDC);
++         } else if (iAdaptiveLoop==0) {
+             iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
+          } else {
+             iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
+@@ -12867,9 +12872,17 @@ int TRPOptDoseMatrixPhys ( struct STRPOPT      *psOpt,
+       sCE.iRC = ERRTRPDOSE_BADALGORITHM; goto gError;
+    }
+ 
+    nOptFlds = psOpt->nF;
+-   
+-   
++
++   if ( getenv("TRIP_FDCB_MOJO_MATRIX") ) {
++      iRC = TRPOptDoseMatrixPhysMojoBuild(psOpt, psFB, psOV, nVoxel,
++                                          nPreviousVoxels, iDoseAlg);
++      if ( iRC & CMDERR_MASK ) {
++         sCE.iRC = iRC & ~CMDERR_MASK; goto gError;
++      }
++      goto gFDCBMojoMatrixBuilt;
++   }
++
+       /* multiple rsts in 4D optimization possible */
+    int nRstStates = 1;
+ //    if(psOpt->ulFlag & TRPOPT_4DRST ) {
+@@ -13118,6 +13134,7 @@ int TRPOptDoseMatrixPhys ( struct STRPOPT      *psOpt,
+          ++iF; 
+       } //motion states
+    }  //fields  
++gFDCBMojoMatrixBuilt:
+ //                   fprintf(stderr,"%s line %d function %s\n",__FILE__,__LINE__,__func__);
+   if(ulFlag & TRPOPT_DEBUG) {
+      fprintf(stderr,"\n<D>MEMORY AFTER matrix setup\n");
+@@ -13182,6 +13199,7 @@ int TRPOptDoseMatrixPhys ( struct STRPOPT      *psOpt,
+             }
+          }
+       }
++      if ( getenv("TRIP_FDCB_MOJO_MATRIX") == NULL ) {
+       for(int iOV=0; iOV < nVoxel; ++iOV) {
+          for(int iF=0; iF < psOV[iOV].nF; ++iF) {
+ //             if(psOpt->nRobustScenario) {
+@@ -13213,6 +13231,7 @@ int TRPOptDoseMatrixPhys ( struct STRPOPT      *psOpt,
+          }
+          fprintf(stderr,"<D> \t Field %2d: %9u nFDC / %9u nMFDC / %2d scenarios\n", iF+1, pnFDC[iF], pnMFDC[iF],psOpt->nRobustScenario);
+       }
++      }
+    }
+    
+   if(psOpt->ulFlag & TRPOPT_CALCOPTDVH) {
+diff --git a/trpspc.c b/trpspc.c
+--- a/trpspc.c
++++ b/trpspc.c
+@@ -4865,6 +4865,9 @@ struct SCMDERR TRPSpcPrimMoments(
+    size_t nMaxThreads,             /**< inp: Maximum Threads to be used */
+    uint32_t ulFlag          /**< inp: function action flags  */
+ ) {
++   if ( getenv("TRIP_FDCB_MOJO") )
++      return TRPSpcPrimMomentsMT(psSPrim, psdEdx, nMaxThreads, ulFlag);
++
+    
+ // #ifndef TRPMACHINE_BIOPS6B
+ //    return TRPSpcPrimMomentsMT( psSPrim, psdEdx, nMaxThreads, ulFlag );

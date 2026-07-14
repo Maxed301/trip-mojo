@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-trip_dir="${TRIP4D_DIR:-/home/max/Projects/trip4d}"
+trip_dir="${TRIP_DIR:-/home/max/Projects/trip_temp}"
 out_dir="$repo_dir/build/ffi"
 
 mkdir -p "$out_dir"

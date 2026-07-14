@@ -1,0 +1,2 @@
+# This patch mirrors legacy TRiP whitespace so it can apply to the source tree.
+integration/trip_temp/trip_temp_mojo.patch -whitespace
