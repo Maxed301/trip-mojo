@@ -22,3 +22,12 @@ tmp_p101_*.exec
 perf.data*
 *.profraw
 *.profdata
+
+# Reference/parity data and dose artifacts (never commit or push)
+reference/
+*.dos
+*.nrrd
+*.hed
+*.rst
+*.dvh
+*.dvh.gd
