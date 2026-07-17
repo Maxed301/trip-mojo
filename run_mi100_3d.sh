@@ -9,7 +9,7 @@
 #SBATCH -N 1
 #SBATCH -c 16
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:05:00
 
 set -euo pipefail
 
@@ -39,18 +39,19 @@ test -f "${TOOLCHAIN}/std.mojopkg"
 echo 'da280f4d1d5023c0d21f35cf543d81a7a890b8a6fd6fec54e8c91f77808401de' \
   "${TOOLCHAIN}/std.mojopkg" | sha256sum -c
 
-awk '/^dose / { exit } { print }' "${EXEC_SRC}" | sed \
+sed \
   -e "s|/home/max/Projects/TRIP_DATA|${ROOT}/TRIP_DATA|g" \
   -e "s/maxthreads(40)/maxthreads(${THREADS})/g" \
   -e "s|field 1 / write file(.*)|field 1 / write file(${OUTDIR}/StaticP101_2110_field1_iGTV_R.rst)|" \
   -e "s|field 2 / write file(.*)|field 2 / write file(${OUTDIR}/StaticP101_2110_field2_iGTV_R.rst)|" \
+  -e "s|${ROOT}/TRIP_DATA/P101/3Ddose_P101_2110_iGTV|${OUTDIR}/3Ddose_P101_2110_iGTV|g" \
+  -e "s|${ROOT}/TRIP_DATA/P101/3Ddose_P101_2110_GTV3mm|${OUTDIR}/3Ddose_P101_2110_GTV3mm|g" \
+  "${EXEC_SRC}" \
   > "${WORK}/mojo.exec"
-echo quit >> "${WORK}/mojo.exec"
 
 echo "job=${JOB_ID} host=$(hostname) threads=${THREADS} output=${OUTDIR}"
 echo "trip_temp_commit=$(git -C "${TRIP}" rev-parse HEAD)"
 echo "trip_mojo_commit=$(git -C "${REPO}" rev-parse HEAD) target=gfx908"
-rocm-smi --showproductname --showmeminfo vram || true
 
 apptainer exec --rocm -B /lustre:/lustre -B "${WORK}:${WORK}" \
   "${CONTAINER}" env \
@@ -64,9 +65,10 @@ apptainer exec --rocm -B /lustre:/lustre -B "${WORK}:${WORK}" \
     MODULAR_DEVICE_CONTEXT_SYNC_MODE=true \
     MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_CHUNK_PERCENT=80 \
     MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT=80 \
-    LD_LIBRARY_PATH="${BUILD_DIR}:${MOJO_RUNTIME}:/.singularity.d/libs:${LD_LIBRARY_PATH:-}" \
+    LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64:${BUILD_DIR}:${MOJO_RUNTIME}:/.singularity.d/libs:${LD_LIBRARY_PATH:-}" \
     bash --noprofile --norc -lc '
       set -euo pipefail
+      rocm-smi --showproductname --showmeminfo vram || true
       cd "${REPO}"
       "${UV}" sync --frozen
       ln -sf "${TOOLCHAIN}/std.mojopkg" "${IMPORT_DIR}/std.mojopkg"
@@ -75,15 +77,23 @@ apptainer exec --rocm -B /lustre:/lustre -B "${WORK}:${WORK}" \
       export MODULAR_MOJO_MAX_IMPORT_PATH="${IMPORT_DIR}"
       MOJO="${REPO}/.venv/bin/mojo"
       "${MOJO}" build -I . -O3 -g1 -D FDCB_CPU_THREADS="${THREADS}" \
-        -D FDCB_ABI_ACCELERATOR=true --target-accelerator gfx908 \
+        -D FDCB_ABI_ACCELERATOR=true -D FDCB_TRACE=true \
+        --target-accelerator gfx908 \
         --emit shared-lib fdcb_abi.mojo -Xlinker -lm \
         -o "${BUILD_DIR}/libtrip_fdcb_mojo.so"
       "${MOJO}" run -I . -O3 -D FDCB_CPU_THREADS="${THREADS}" \
         --target-accelerator gfx908 tests/test_fdcb_accelerator.mojo
+      cc -O2 tools/compare_rst_particles.c -lm \
+        -o "${BUILD_DIR}/compare_rst_particles"
+      cc -O2 tools/compare_float_cubes.c -lm \
+        -o "${BUILD_DIR}/compare_float_cubes"
       START=$(date +%s.%N)
+      # Keep the TRiP Float64 matrix and initial direction for complexminp parity.
+      # Device matrix construction uses vendor-specific exp implementations.
       env OMP_NUM_THREADS="${THREADS}" \
-        TRIP_FDCB_MOJO=1 TRIP_FDCB_MOJO_MATRIX=1 TRIP_FDCB_MOJO_DIRECT=1 \
-        TRIP_FDCB_MOJO_DEVICE_BOOTSTRAP=1 \
+        TRIP_FDCB_MOJO=1 \
+        TRIP_FDCB_MOJO_TRACE=1 \
+        TRIP_CLINICAL_DOSE_MOJO=1 TRIP_CLINICAL_DOSE_MOJO_ACCELERATOR=1 \
         "${TRIP_BINARY}" < "${WORK}/mojo.exec" > "${OUTDIR}/run.log" 2>&1
       END=$(date +%s.%N)
       awk -v start="${START}" -v end="${END}" \
@@ -92,15 +102,38 @@ apptainer exec --rocm -B /lustre:/lustre -B "${WORK}:${WORK}" \
     '
 
 cat "${OUTDIR}/mojo.time"
-grep -E 'FDCB Mojo physical matrix|FDCB Mojo pack|FDCB Mojo optimize|FDCB Mojo:|OptVoxelSetup:|OptCmd:' \
+if grep -Eq '^<(E|SYS)>|Mojo clinical dose ABI failed' "${OUTDIR}/run.log"; then
+  echo "TRiP reported an error:" >&2
+  grep -E '^<(E|SYS)>|Mojo clinical dose ABI failed' \
+    "${OUTDIR}/run.log" >&2
+  exit 1
+fi
+grep -E 'FDCB Mojo physical matrix|FDCB Mojo pack|FDCB Mojo optimize|FDCB Mojo:|Mojo clinical dose:|OptVoxelSetup:|OptCmd:|DoseCmd:|DVHCalc:' \
   "${OUTDIR}/run.log" | tail -30
+parity_failed=0
 for field in 1 2; do
   name="StaticP101_2110_field${field}_iGTV_R.rst"
   if cmp -s "${REFERENCE}/${name}" "${OUTDIR}/${name}"; then
     echo "field${field}_byte_identical=yes"
   else
     echo "field${field}_byte_identical=no"
+    parity_failed=1
   fi
-  "${REPO}/build/h200/compare_rst_particles" \
+  "${BUILD_DIR}/compare_rst_particles" \
     "${REFERENCE}/${name}" "${OUTDIR}/${name}"
 done
+grep -q 'Mojo clinical dose: backend=accelerator states=1' "${OUTDIR}/run.log"
+for kind in phys bio; do
+  printf '%s ' "${kind}"
+  "${BUILD_DIR}/compare_float_cubes" \
+    "${REFERENCE}/3Ddose_P101_2110_iGTV.${kind}.dos" \
+    "${OUTDIR}/3Ddose_P101_2110_iGTV.${kind}.dos"
+done
+if cmp -s "${REFERENCE}/3Ddose_P101_2110_GTV3mm.dvh.gd" \
+          "${OUTDIR}/3Ddose_P101_2110_GTV3mm.dvh.gd"; then
+  echo "dvh_byte_identical=yes"
+else
+  echo "dvh_byte_identical=no"
+  parity_failed=1
+fi
+exit "${parity_failed}"

@@ -1,8 +1,13 @@
 """Full host iteration controller shared by packed FDCB backends."""
 
 from std.math import sqrt
+from std.memory import ArcPointer
+from std.sys import get_defined_bool
 
-from fdcb_accelerator import FDCBAccelerator
+from fdcb_accelerator import (
+    FDCBAccelerator,
+    fdcb_device_shards,
+)
 from fdcb_cpu import (
     evaluate_validated_packed_biological_fdcb,
     fdcb_exact_step,
@@ -20,6 +25,7 @@ from fdcb_problem import (
     FDCB_FLAG_BIOLOGICAL,
     FDCB_FLAG_DEVICE_BOOTSTRAP,
     FDCB_FLAG_INITIALIZE,
+    FDCB_FLAG_TRACE,
     evaluate_validated_packed_physical_fdcb,
 )
 from reference_math import reference_exp
@@ -30,6 +36,7 @@ comptime FDCB_STOP_CHI2_NOT_DECREASING = UInt32(2)
 comptime FDCB_STOP_CHI_SQUARE_LIMIT = UInt32(3)
 comptime FDCB_STOP_EPSILON = UInt32(4)
 comptime FDCB_STOP_VECTOR_CHANGE = UInt32(5)
+comptime FDCB_TRACE_BUILD = get_defined_bool["FDCB_TRACE", False]()
 
 
 @fieldwise_init
@@ -211,6 +218,93 @@ struct FDCBDeviceEvaluator(FDCBEvaluator, Movable):
         return self.accelerator.exact_step(direction)
 
 
+struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
+    var accelerators: List[ArcPointer[FDCBAccelerator]]
+
+    def __init__(out self, problem: FDCBProblemV1, device_count: Int) raises:
+        problem.validate()
+        var shards = fdcb_device_shards(problem, device_count)
+        var accelerators = List[ArcPointer[FDCBAccelerator]]()
+        accelerators.reserve(device_count)
+        for device in range(device_count):
+            accelerators.append(
+                ArcPointer(
+                    FDCBAccelerator(
+                        problem,
+                        device,
+                        shards[device].voxel_offset,
+                        shards[device].voxel_count,
+                        False,
+                    )
+                )
+            )
+        self.accelerators = accelerators^
+
+    def evaluate(
+        mut self, problem: FDCBProblemV1, particles: List[Float64]
+    ) raises -> FDCBIterationEvaluation:
+        _ = problem
+        for device in range(len(self.accelerators)):
+            self.accelerators[device][].enqueue_evaluation_front(particles)
+        for device in range(len(self.accelerators)):
+            self.accelerators[device][].enqueue_evaluation_backprojection()
+        var first = self.accelerators[0][].collect_evaluation(False)
+        var gradient = first.gradient.copy()
+        var chi2 = first.chi2()
+        var weighted = first.weighted_dose2()
+        for device in range(1, len(self.accelerators)):
+            var partial = self.accelerators[device][].collect_evaluation(False)
+            chi2 += partial.chi2()
+            weighted += partial.weighted_dose2()
+            for point in range(len(gradient)):
+                gradient[point] += partial.gradient[point]
+        var norm2 = 0.0
+        for value in gradient:
+            norm2 += value * value
+        return FDCBIterationEvaluation(
+            List[Float64](),
+            List[Float64](),
+            List[Int32](),
+            List[Int32](),
+            gradient^,
+            chi2,
+            weighted,
+            sqrt(norm2),
+        )
+
+    def initial_direction(
+        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+    ) raises -> List[Float64]:
+        if (problem.settings.flags & FDCB_FLAG_DEVICE_BOOTSTRAP) == UInt32(0):
+            return initial_direction(problem, gradient)
+        var direction = self.accelerators[0][].zero_gradient_direction()
+        for device in range(1, len(self.accelerators)):
+            var partial = self.accelerators[device][].zero_gradient_direction()
+            for point in range(len(direction)):
+                direction[point] += partial[point]
+        return direction^
+
+    def exact_step(
+        mut self,
+        problem: FDCBProblemV1,
+        evaluation: FDCBIterationEvaluation,
+        direction: List[Float64],
+    ) raises -> Float64:
+        _ = problem
+        _ = evaluation
+        for device in range(len(self.accelerators)):
+            self.accelerators[device][].enqueue_exact_step(direction)
+        var numerator = 0.0
+        var denominator = 0.0
+        for device in range(len(self.accelerators)):
+            var partial = self.accelerators[device][].collect_exact_step_terms()
+            numerator += partial.numerator
+            denominator += partial.denominator
+        if denominator == 0.0:
+            return 0.0
+        return numerator / denominator
+
+
 def optimize_packed_fdcb(
     problem: FDCBProblemV1,
 ) raises -> FDCBOptimizationResult:
@@ -223,6 +317,19 @@ def optimize_packed_fdcb_accelerator(
     problem: FDCBProblemV1,
 ) raises -> FDCBOptimizationResult:
     var evaluator = FDCBDeviceEvaluator(problem)
+    return optimize_packed_fdcb_with_evaluator(problem, evaluator)
+
+
+def optimize_packed_fdcb_two_accelerators(
+    problem: FDCBProblemV1,
+) raises -> FDCBOptimizationResult:
+    return optimize_packed_fdcb_accelerators(problem, 2)
+
+
+def optimize_packed_fdcb_accelerators(
+    problem: FDCBProblemV1, device_count: Int
+) raises -> FDCBOptimizationResult:
+    var evaluator = FDCBMultiDeviceEvaluator(problem, device_count)
     return optimize_packed_fdcb_with_evaluator(problem, evaluator)
 
 
@@ -262,6 +369,18 @@ def optimize_packed_fdcb_with_evaluator[
     var last_factor = 0.0
     var last_exact_step = 0.0
     var stop_reason = FDCB_STOP_MAX_ITERATIONS
+    var trace = (problem.settings.flags & FDCB_FLAG_TRACE) != UInt32(0)
+    comptime if FDCB_TRACE_BUILD:
+        trace = True
+    if trace:
+        print(
+            "<TRACE> FDCB initial chi2",
+            evaluation.chi2,
+            "weighted",
+            evaluation.weighted_dose2,
+            "gradient",
+            evaluation.gradient_norm,
+        )
 
     var initialize = (problem.settings.flags & FDCB_FLAG_INITIALIZE) != UInt32(
         0
@@ -352,6 +471,33 @@ def optimize_packed_fdcb_with_evaluator[
         else:
             relative_change = 0.0
         last_factor = factor
+        if trace:
+            print(
+                "<TRACE> FDCB update",
+                update_index,
+                "iteration",
+                iteration,
+                "init",
+                initialization_update,
+                "before",
+                evaluation.chi2,
+                "after",
+                candidate_evaluation.chi2,
+                "relative",
+                relative_change,
+                "exact",
+                exact_step,
+                "factor",
+                factor,
+                "gradient",
+                candidate_evaluation.gradient_norm,
+                "vector",
+                vector_change,
+                "deleted",
+                deleted,
+                "rng",
+                random_draws,
+            )
         if (
             not initialization_update
             and iteration >= Int(problem.settings.grace_iterations)

@@ -43,9 +43,10 @@ apptainer exec --rocm -B /lustre:/lustre "${CONTAINER}" env \
   MODULAR_CRASH_REPORTING_ENABLED=false \
   MODULAR_DEVICE_CONTEXT_SYNC_MODE=true \
   MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT=20 \
-  LD_LIBRARY_PATH="${MOJO_LIB}:/.singularity.d/libs:${LD_LIBRARY_PATH:-}" \
+  LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64:${MOJO_LIB}:/.singularity.d/libs:${LD_LIBRARY_PATH:-}" \
   bash --noprofile --norc -lc '
     set -euo pipefail
+    rocm-smi --showproductname --showmeminfo vram || true
     cd "${REPO}"
     "${UV}" sync --frozen
     ln -sf "${TOOLCHAIN}/std.mojopkg" "${IMPORT_DIR}/std.mojopkg"

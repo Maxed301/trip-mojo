@@ -53,6 +53,23 @@ The numerical optimizer contract is 12 threads. This H200 runner reserves 32
 threads for TRiP setup and uses 16 for metadata packing. A 12-thread setup probe
 took 30.461 s; shared-node variation remains visible.
 
+## Two-device memory scaling
+
+`run_h200_4d_2gpu.sh` partitions contiguous whole voxels near half the sparse
+coefficient count. Particles and small field metadata are replicated; slices,
+scenario state and Float64 coefficients are local to one device. Both forward
+passes and both backprojections are queued before their partial gradients and
+scalar reductions are merged on the host.
+
+H200 job 22598 used the canonical CPU-built matrix and measured 32,605 MiB of
+reserved VRAM per GPU, 13.604 s optimization, 38.80 s `OptCmd` and 49.311 s
+process wall time. It stopped at iteration 120 with the canonical objective and
+wrote both RSTs byte-identically. This path trades speed and host memory for
+lower per-device VRAM; the direct one-H200 path above remains the performance
+reference. Peak host RSS was 139,720,980 KiB because TRiP's source matrices and
+the packed host coefficient arrays overlap; removing that overlap is separate
+from device sharding.
+
 ## Integration
 
 Hydra keeps one `trip_temp` checkout at commit `1fb423f`, patched once with the

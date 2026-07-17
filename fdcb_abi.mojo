@@ -4,7 +4,10 @@ from std.algorithm import parallelize
 from std.memory import OpaquePointer, UnsafePointer, alloc
 from std.sys import get_defined_bool, get_defined_int
 
-from clinical_dose import ClinicalDoseOutputV1, clinical_dose_compute_abi_v1
+from clinical_dose import (
+    ClinicalDoseOutputV1,
+    clinical_dose_compute_abi_v1,
+)
 from clinical_dose_accelerator import clinical_dose_compute_accelerator_abi_v1
 from fdcb_matrix_accelerator import (
     FDCBMatrixResultV1,
@@ -18,6 +21,7 @@ from fdcb_optimize import (
     evaluate_packed_iteration,
     optimize_packed_fdcb,
     optimize_packed_fdcb_accelerator,
+    optimize_packed_fdcb_accelerators,
     optimize_packed_fdcb_accelerator_matrix,
 )
 from fdcb_problem import (
@@ -377,6 +381,34 @@ def trip_fdcb_storage_optimize_accelerator_v1(
             particles_out_count,
             result_pointer,
         )
+    else:
+        return Int32(-3)
+
+
+@export("trip_fdcb_storage_optimize_accelerators_v1", ABI="C")
+def trip_fdcb_storage_optimize_accelerators_v1(
+    storage_pointer: OpaquePointer[MutExternalOrigin],
+    particles_out: UnsafePointer[Float64, MutExternalOrigin],
+    particles_out_count: UInt64,
+    device_count: UInt32,
+    result_pointer: OpaquePointer[MutExternalOrigin],
+) -> Int32:
+    comptime if FDCB_ABI_ACCELERATOR:
+        try:
+            if device_count < UInt32(2) or device_count > UInt32(3):
+                return Int32(-2)
+            var storage = storage_pointer.bitcast[ABIProblemStorage]()
+            if particles_out_count != UInt64(len(storage[].problem.particles)):
+                return Int32(-2)
+            var result = optimize_packed_fdcb_accelerators(
+                storage[].problem, Int(device_count)
+            )
+            return write_optimization_result(
+                result, particles_out, result_pointer
+            )
+        except error:
+            print("FDCB multi-accelerator optimize ABI error:", error)
+            return Int32(-1)
     else:
         return Int32(-3)
 

@@ -1,9 +1,9 @@
 """Backend-neutral packed clinical direct-dose CPU kernel."""
 
 from std.algorithm import parallelize
-from std.math import floor
 from std.memory import OpaquePointer, UnsafePointer
 from std.sys import get_defined_int
+from std.sys.info import size_of
 
 from reference_math import reference_exp
 
@@ -113,6 +113,9 @@ struct ClinicalDoseGridV1(Copyable, Movable):
 struct ClinicalDoseCTStateV1(Copyable, Movable):
     var grid: ClinicalDoseGridV1
     var data_offset: UInt64
+    var x_boundary_offset: UInt64
+    var y_boundary_offset: UInt64
+    var z_boundary_offset: UInt64
     var pmod: Float64
     var pore_size: Float64
     var byte_swap: Int32
@@ -186,12 +189,19 @@ struct ClinicalDoseProblemViewV1(Copyable, Movable):
     var algorithm: UInt32
     var biology_model: UInt32
     var max_threads: UInt32
-    var reserved: UInt32
+    var struct_size: UInt32
     var ct_value_count: UInt64
+    var ct_boundary_count: UInt64
+    var dose_axis_count: UInt64
+    var dose_x_offset: UInt64
+    var dose_y_offset: UInt64
+    var dose_z_offset: UInt64
     var dose_grid: ClinicalDoseGridV1
     var voxel_voi: UnsafePointer[Int32, MutExternalOrigin]
     var ct_states: UnsafePointer[ClinicalDoseCTStateV1, MutExternalOrigin]
     var ct_data: UnsafePointer[Int16, MutExternalOrigin]
+    var ct_boundaries: UnsafePointer[Float64, MutExternalOrigin]
+    var dose_axis_centers: UnsafePointer[Float64, MutExternalOrigin]
     var hlut_x: UnsafePointer[Float64, MutExternalOrigin]
     var hlut_y: UnsafePointer[Float64, MutExternalOrigin]
     var grid_fields: UnsafePointer[ClinicalDoseGridFieldV1, MutExternalOrigin]
@@ -258,6 +268,8 @@ def swap_i16(value: Int16) -> Int16:
 
 
 def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
+    if view.struct_size != UInt32(size_of[ClinicalDoseProblemViewV1]()):
+        raise Error("clinical dose ABI struct size mismatch")
     if view.version != CLINICAL_DOSE_VERSION_V1:
         raise Error("unsupported clinical dose problem version")
     if view.state_count == UInt32(0):
@@ -288,10 +300,8 @@ def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
         raise Error("biological clinical dose V1 requires low-dose biology")
     if not biological and view.biology_model != CLINICAL_DOSE_BIOLOGY_NONE:
         raise Error("physical clinical dose must not request a biology model")
-    if view.max_threads == UInt32(0) or view.reserved != UInt32(0):
-        raise Error(
-            "clinical dose thread count or reserved contract field is invalid"
-        )
+    if view.max_threads == UInt32(0):
+        raise Error("clinical dose thread count is invalid")
     var expected = (
         UInt64(view.dose_grid.nx)
         * UInt64(view.dose_grid.ny)
@@ -299,6 +309,12 @@ def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
     )
     if expected != UInt64(view.grid_voxel_count):
         raise Error("clinical dose grid dimensions do not match voxel count")
+    if (
+        view.dose_x_offset + UInt64(view.dose_grid.nx) > view.dose_axis_count
+        or view.dose_y_offset + UInt64(view.dose_grid.ny) > view.dose_axis_count
+        or view.dose_z_offset + UInt64(view.dose_grid.nz) > view.dose_axis_count
+    ):
+        raise Error("clinical dose axes exceed packed center data")
     if view.hlut_count == UInt32(0) or view.ct_value_count == UInt64(0):
         raise Error("clinical dose requires CT and HLUT data")
     var four_d = view.state_count > UInt32(1)
@@ -311,15 +327,22 @@ def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
         raise Error("static clinical dose must not provide transformed voxels")
     var next_field = UInt64(0)
     for state_index in range(Int(view.state_count)):
-        var ct_grid = view.ct_states[state_index].grid.copy()
-        var ct_end = view.ct_states[state_index].data_offset + UInt64(
-            ct_grid.nx
-        ) * UInt64(ct_grid.ny) * UInt64(ct_grid.nz)
+        var ct_state = view.ct_states[state_index].copy()
+        var ct_grid = ct_state.grid.copy()
+        var ct_end = ct_state.data_offset + UInt64(ct_grid.nx) * UInt64(
+            ct_grid.ny
+        ) * UInt64(ct_grid.nz)
         if (
             ct_grid.nx <= Int32(0)
             or ct_grid.ny <= Int32(0)
             or ct_grid.nz <= Int32(0)
             or ct_end > view.ct_value_count
+            or ct_state.x_boundary_offset + UInt64(ct_grid.nx) + 1
+            > view.ct_boundary_count
+            or ct_state.y_boundary_offset + UInt64(ct_grid.ny) + 1
+            > view.ct_boundary_count
+            or ct_state.z_boundary_offset + UInt64(ct_grid.nz) + 1
+            > view.ct_boundary_count
         ):
             raise Error("clinical dose CT state exceeds packed CT data")
         if four_d:
@@ -388,8 +411,6 @@ def hlut_lookup(view: ClinicalDoseProblemViewV1, hu: Float64) -> Float64:
     var count = Int(view.hlut_count)
     if hu <= Float64(view.hlut_x[0]):
         return max2(0.0, Float64(view.hlut_y[0]))
-    if hu >= Float64(view.hlut_x[count - 1]):
-        return max2(0.0, Float64(view.hlut_y[count - 1]))
     var low = 0
     var high = count - 1
     while high - low > 1:
@@ -425,35 +446,37 @@ def build_dense_hlut(
 
 
 @always_inline("nodebug")
-def grid_index(
-    grid: ClinicalDoseGridV1,
-    x: Float64,
-    y: Float64,
-    z: Float64,
+def boundary_bin[
+    boundary_origin: Origin, //
+](
+    boundaries: UnsafePointer[Float64, boundary_origin],
+    offset: UInt64,
+    count: Int,
+    position: Float64,
 ) -> Int:
-    if x < grid.boundary_x0 or y < grid.boundary_y0 or z < grid.boundary_z0:
-        return -1
-    var ix = Int(floor((x - grid.boundary_x0) / grid.dx))
-    var iy = Int(floor((y - grid.boundary_y0) / grid.dy))
-    var iz = Int(floor((z - grid.boundary_z0) / grid.dz))
     if (
-        ix < 0
-        or ix >= Int(grid.nx)
-        or iy < 0
-        or iy >= Int(grid.ny)
-        or iz < 0
-        or iz >= Int(grid.nz)
+        position < boundaries[Int(offset)]
+        or position > boundaries[Int(offset) + count]
     ):
         return -1
-    return (iz * Int(grid.ny) + iy) * Int(grid.nx) + ix
+    var low = 0
+    var high = count
+    while high - low > 1:
+        var middle = (low + high) // 2
+        if position < boundaries[Int(offset) + middle]:
+            high = middle
+        else:
+            low = middle
+    return low
 
 
 @always_inline("nodebug")
 def siddon_h2o[
-    ct_origin: Origin, dense_origin: Origin, //
+    ct_origin: Origin, boundary_origin: Origin, dense_origin: Origin, //
 ](
     state: ClinicalDoseCTStateV1,
     ct_data: UnsafePointer[Int16, ct_origin],
+    ct_boundaries: UnsafePointer[Float64, boundary_origin],
     dense_hlut: UnsafePointer[Float64, dense_origin],
     px: Float64,
     py: Float64,
@@ -471,18 +494,21 @@ def siddon_h2o[
     var lmax_z = 1.0e8
     if abs64(dlx) > 1.0e-6:
         lmax_x = max2(
-            (grid.boundary_x0 - px) / dlx,
-            (grid.boundary_x0 + grid.dx * Float64(grid.nx) - px) / dlx,
+            (ct_boundaries[Int(state.x_boundary_offset)] - px) / dlx,
+            (ct_boundaries[Int(state.x_boundary_offset) + Int(grid.nx)] - px)
+            / dlx,
         )
     if abs64(dly) > 1.0e-6:
         lmax_y = max2(
-            (grid.boundary_y0 - py) / dly,
-            (grid.boundary_y0 + grid.dy * Float64(grid.ny) - py) / dly,
+            (ct_boundaries[Int(state.y_boundary_offset)] - py) / dly,
+            (ct_boundaries[Int(state.y_boundary_offset) + Int(grid.ny)] - py)
+            / dly,
         )
     if abs64(dlz) > 1.0e-6:
         lmax_z = max2(
-            (grid.boundary_z0 - pz) / dlz,
-            (grid.boundary_z0 + grid.dz * Float64(grid.nz) - pz) / dlz,
+            (ct_boundaries[Int(state.z_boundary_offset)] - pz) / dlz,
+            (ct_boundaries[Int(state.z_boundary_offset) + Int(grid.nz)] - pz)
+            / dlz,
         )
     var lmax = min3(lmax_x, lmax_y, lmax_z)
 
@@ -493,40 +519,34 @@ def siddon_h2o[
     var step_y = 0
     var step_z = 0
     if dlx > 0.0:
-        first_x = (
-            Int(grid.nx)
-            + 1
-            - Int(
-                (grid.boundary_x0 + grid.dx * Float64(grid.nx) - px) / grid.dx
-            )
+        first_x = 1 + boundary_bin(
+            ct_boundaries, state.x_boundary_offset, Int(grid.nx), px
         )
         step_x = 1
     elif dlx < 0.0:
-        first_x = Int((px - grid.boundary_x0) / grid.dx)
+        first_x = boundary_bin(
+            ct_boundaries, state.x_boundary_offset, Int(grid.nx), px
+        )
         step_x = -1
     if dly > 0.0:
-        first_y = (
-            Int(grid.ny)
-            + 1
-            - Int(
-                (grid.boundary_y0 + grid.dy * Float64(grid.ny) - py) / grid.dy
-            )
+        first_y = 1 + boundary_bin(
+            ct_boundaries, state.y_boundary_offset, Int(grid.ny), py
         )
         step_y = 1
     elif dly < 0.0:
-        first_y = Int((py - grid.boundary_y0) / grid.dy)
+        first_y = boundary_bin(
+            ct_boundaries, state.y_boundary_offset, Int(grid.ny), py
+        )
         step_y = -1
     if dlz > 0.0:
-        first_z = (
-            Int(grid.nz)
-            + 1
-            - Int(
-                (grid.boundary_z0 + grid.dz * Float64(grid.nz) - pz) / grid.dz
-            )
+        first_z = 1 + boundary_bin(
+            ct_boundaries, state.z_boundary_offset, Int(grid.nz), pz
         )
         step_z = 1
     elif dlz < 0.0:
-        first_z = Int((pz - grid.boundary_z0) / grid.dz)
+        first_z = boundary_bin(
+            ct_boundaries, state.z_boundary_offset, Int(grid.nz), pz
+        )
         step_z = -1
 
     var next_x = 1.0e8
@@ -537,37 +557,46 @@ def siddon_h2o[
     var delta_z = 0.0
     if abs64(dlx) > 1.0e-6:
         while True:
-            next_x = (grid.boundary_x0 + Float64(first_x) * grid.dx - px) / dlx
+            next_x = (
+                ct_boundaries[Int(state.x_boundary_offset) + first_x] - px
+            ) / dlx
             first_x += step_x
             if next_x >= 1.0e-6:
                 break
         delta_x = abs64(grid.dx / dlx)
     if abs64(dly) > 1.0e-6:
         while True:
-            next_y = (grid.boundary_y0 + Float64(first_y) * grid.dy - py) / dly
+            next_y = (
+                ct_boundaries[Int(state.y_boundary_offset) + first_y] - py
+            ) / dly
             first_y += step_y
             if next_y >= 1.0e-6:
                 break
         delta_y = abs64(grid.dy / dly)
     if abs64(dlz) > 1.0e-6:
         while True:
-            next_z = (grid.boundary_z0 + Float64(first_z) * grid.dz - pz) / dlz
+            next_z = (
+                ct_boundaries[Int(state.z_boundary_offset) + first_z] - pz
+            ) / dlz
             first_z += step_z
             if next_z >= 1.0e-6:
                 break
         delta_z = abs64(grid.dz / dlz)
 
     var middle = min3(next_x, next_y, next_z) * 0.5
-    var first_index = grid_index(
-        grid, px + middle * dlx, py + middle * dly, pz + middle * dlz
+    var ix = boundary_bin(
+        ct_boundaries, state.x_boundary_offset, Int(grid.nx), px + middle * dlx
     )
-    if first_index < 0:
+    var iy = boundary_bin(
+        ct_boundaries, state.y_boundary_offset, Int(grid.ny), py + middle * dly
+    )
+    var iz = boundary_bin(
+        ct_boundaries, state.z_boundary_offset, Int(grid.nz), pz + middle * dlz
+    )
+    if ix < 0 or iy < 0 or iz < 0:
         return 0.0
     var nx = Int(grid.nx)
     var ny = Int(grid.ny)
-    var ix = first_index % nx
-    var iy = (first_index // nx) % ny
-    var iz = first_index // (nx * ny)
     var current = 0.0
     var h2o = 0.0
     var limit = lmax * (1.0 - 1.0e-7)
@@ -764,6 +793,7 @@ def compute_clinical_dose_voxel[
         var h2o = siddon_h2o(
             view.ct_states[state_index],
             view.ct_data,
+            view.ct_boundaries,
             dense_hlut,
             px,
             py,
@@ -930,17 +960,15 @@ def compute_clinical_dose(
         var start = row * Int(view.dose_grid.nx)
         var end = start + Int(view.dose_grid.nx)
         for voxel in range(start, end):
-            var total = ClinicalDoseOutputV1(
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-            )
+            var total = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             var nx = Int(view.dose_grid.nx)
             var ny = Int(view.dose_grid.ny)
             var ix = voxel % nx
             var iy = (voxel // nx) % ny
             var iz = voxel // (nx * ny)
-            var static_x = view.dose_grid.x0 + Float64(ix) * view.dose_grid.dx
-            var static_y = view.dose_grid.y0 + Float64(iy) * view.dose_grid.dy
-            var static_z = view.dose_grid.z0 + Float64(iz) * view.dose_grid.dz
+            var static_x = view.dose_axis_centers[Int(view.dose_x_offset) + ix]
+            var static_y = view.dose_axis_centers[Int(view.dose_y_offset) + iy]
+            var static_z = view.dose_axis_centers[Int(view.dose_z_offset) + iz]
             for state_index in range(Int(view.state_count)):
                 var field_offset = 0
                 var field_count = Int(view.field_count)

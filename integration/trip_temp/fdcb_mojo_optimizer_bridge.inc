@@ -15,6 +15,14 @@ static int FDCBMojoPackThreads(void) {
    return (int) threads;
 }
 
+static int FDCBMojoDeviceCount(void) {
+   const char *value = getenv("TRIP_FDCB_MOJO_DEVICES");
+   if ( value == NULL || !strcmp(value, "1") ) return 1;
+   if ( !strcmp(value, "2") ) return 2;
+   if ( !strcmp(value, "3") ) return 3;
+   return 0;
+}
+
 static void FDCBMojoMatrixReleaseArenas(void);
 static void FDCBMojoMatrixResetArenaReferences(void);
 static void FDCBMojoMatrixRetainDose(const struct STRPFLDDOSE *dose);
@@ -102,17 +110,23 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    int device_bootstrap = 0;
    int direct_pack_error = 0;
    int pack_threads = FDCBMojoPackThreads();
+   int device_count = FDCBMojoDeviceCount();
    int rc = -1;
 
    memset(&problem, 0, sizeof(problem));
    memset(&arrays, 0, sizeof(arrays));
    memset(&result, 0, sizeof(result));
+   if ( device_count == 0 ) {
+      fprintf(stderr, "<E> TRIP_FDCB_MOJO_DEVICES must be 1, 2 or 3\n");
+      goto done;
+   }
    gFDCBMojoFinalMinimumApplied = 0;
    problem.version = FDCB_ABI_VERSION_V1;
    problem.flags = FDCB_FLAG_INITIALIZE;
    device_bootstrap =
       getenv("TRIP_FDCB_MOJO_DEVICE_BOOTSTRAP") != NULL;
    if ( device_bootstrap ) problem.flags |= FDCB_FLAG_DEVICE_BOOTSTRAP;
+   if ( getenv("TRIP_FDCB_MOJO_TRACE") ) problem.flags |= FDCB_FLAG_TRACE;
    if ( opt->ulFlag & TRPOPT_BIO ) problem.flags |= FDCB_FLAG_BIOLOGICAL;
    if ( opt->ulFlag & TRPOPT_ROBUST_INCLUDE_DMAX )
       problem.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX;
@@ -223,6 +237,10 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    FDCBMojoMatrixDiscardUnreferencedArenas();
 
    if ( getenv("TRIP_FDCB_MOJO_DIRECT") != NULL ) {
+      if ( device_count != 1 ) {
+         fprintf(stderr, "<E> direct Mojo matrix is single-device only\n");
+         goto done;
+      }
       if ( FDCBMojoMatrixDirectView(&matrix_storage, &matrix_coefficients,
                                     &matrix_point_indices,
                                     &matrix_entry_count) != 0 ) {
@@ -391,10 +409,14 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
       trim_started = 1;
    output_particles = calloc((size_t) point_count, sizeof(*output_particles));
    if ( output_particles == NULL ) goto done;
+   fprintf(stderr, "<I> FDCB Mojo accelerator devices=%d\n", device_count);
    phase = omp_get_wtime();
    if ( direct_matrix )
       rc = trip_fdcb_matrix_problem_optimize_accelerator_v1(
          storage, output_particles, point_count, &result);
+   else if ( device_count > 1 )
+      rc = trip_fdcb_storage_optimize_accelerators_v1(
+         storage, output_particles, point_count, device_count, &result);
    else
       rc = trip_fdcb_storage_optimize_accelerator_v1(
          storage, output_particles, point_count, &result);
@@ -418,9 +440,10 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
       (result.flags & FDCB_RESULT_FINAL_MIN_PARTICLES_APPLIED) != 0;
    fprintf(stderr,
            "<I> FDCB Mojo: iterations=%" PRIu64 " chi2=%.17g residual=%.17g "
-           "deleted=%" PRIu64 " rng=%" PRIu64 "\n",
+           "deleted=%" PRIu64 " rng=%" PRIu64 " stop=%u\n",
            result.iterations, result.chi2, result.residual_percent,
-           result.minimum_particle_deleted, result.random_draws);
+           result.minimum_particle_deleted, result.random_draws,
+           result.stop_reason);
    if ( setstate((char *) saved_rng) == NULL ) rc = -1;
 
 done:

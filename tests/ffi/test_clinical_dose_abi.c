@@ -15,13 +15,13 @@ _Static_assert(sizeof(ClinicalDoseBioTableV1) == 16, "bio table ABI layout");
 _Static_assert(sizeof(ClinicalDoseEnergyV1) == 64, "energy ABI layout");
 _Static_assert(sizeof(ClinicalDoseFieldV1) == 32, "field ABI layout");
 _Static_assert(sizeof(ClinicalDoseGridV1) == 88, "grid ABI layout");
-_Static_assert(sizeof(ClinicalDoseCTStateV1) == 120, "CT state ABI layout");
+_Static_assert(sizeof(ClinicalDoseCTStateV1) == 144, "CT state ABI layout");
 _Static_assert(sizeof(ClinicalDoseStateV1) == 8, "state ABI layout");
 _Static_assert(sizeof(ClinicalDosePositionV1) == 24, "position ABI layout");
 _Static_assert(sizeof(ClinicalDoseGridFieldV1) == 184,
                "grid field ABI layout");
 _Static_assert(sizeof(ClinicalDoseOutputV1) == 48, "output ABI layout");
-_Static_assert(sizeof(ClinicalDoseProblemViewV1) == 296,
+_Static_assert(sizeof(ClinicalDoseProblemViewV1) == 352,
                "problem view ABI layout");
 
 int main(void) {
@@ -30,9 +30,11 @@ int main(void) {
     };
     const int32_t voxel_voi[1] = {0};
     const int16_t ct_data[1] = {0};
+    const double ct_boundaries[6] = {0.0, 1.0, 0.0, 1.0, 0.0, 1.0};
+    const double dose_axis_centers[3] = {0.5, 0.5, 0.5};
     const double hlut_x[2] = {-32768.0, 32767.0};
     const double hlut_y[2] = {1.0, 1.0};
-    const ClinicalDoseCTStateV1 ct_state = {grid, 0, 0.0, 0.0, 0};
+    const ClinicalDoseCTStateV1 ct_state = {grid, 0, 0, 2, 4, 0.0, 0.0, 0};
     ClinicalDoseGridFieldV1 grid_field;
     memset(&grid_field, 0, sizeof(grid_field));
     grid_field.patient_to_gantry[0] = 1.0f;
@@ -43,11 +45,12 @@ int main(void) {
     grid_field.window_x1 = grid_field.window_y1 = 10.0f;
     const ClinicalDoseFieldV1 field = {0, 1, 100.0f, 8832.0f, 7806.0f};
     ClinicalDoseEnergyV1 energy = {
-        0, 3, 0, 0, 1.0f, 0.0f, -10.0f, 10.0f, -10.0f, 10.0f
+        0, 4, 0, 0, 1.0f, 0.0f, -10.0f, 10.0f, -10.0f, 10.0f
     };
-    ClinicalDosePointV1 points[3] = {
+    ClinicalDosePointV1 points[4] = {
         {0.5f, 0.5f, 0.0f, 100.0f, 10.0},
         {0.5f, 0.5f, 0.0f, 100.0f, 5.0},
+        {0.5 + sqrt(0.75), 0.5 + sqrt(0.75), 0.0f, 1.0f, 1.0},
         {0.5f, 20.0f, 0.0f, 1.0f, 1.0e9}
     };
     const ClinicalDoseDDDTableV1 ddd_table = {0, 2, 5};
@@ -65,18 +68,26 @@ int main(void) {
     problem.version = CLINICAL_DOSE_VERSION_V1;
     problem.grid_voxel_count = problem.state_count = problem.field_count = 1;
     problem.energy_count = problem.ddd_table_count = 1;
-    problem.point_count = 3;
+    problem.point_count = 4;
     problem.ddd_entry_count = 2;
     problem.bio_table_count = problem.voi_count = 1;
     problem.bio_entry_count = problem.hlut_count = 2;
     problem.algorithm = CLINICAL_DOSE_ALGORITHM_MS;
     problem.biology_model = CLINICAL_DOSE_BIOLOGY_NONE;
     problem.max_threads = 1;
+    problem.struct_size = sizeof(problem);
     problem.ct_value_count = 1;
+    problem.ct_boundary_count = 6;
+    problem.dose_axis_count = 3;
+    problem.dose_x_offset = 0;
+    problem.dose_y_offset = 1;
+    problem.dose_z_offset = 2;
     problem.dose_grid = grid;
     problem.voxel_voi = voxel_voi;
     problem.ct_states = &ct_state;
     problem.ct_data = ct_data;
+    problem.ct_boundaries = ct_boundaries;
+    problem.dose_axis_centers = dose_axis_centers;
     problem.hlut_x = hlut_x;
     problem.hlut_y = hlut_y;
     problem.grid_fields = &grid_field;
@@ -90,9 +101,13 @@ int main(void) {
 
     ClinicalDoseOutputV1 output;
     assert(trip_clinical_dose_compute_v1(&problem, &output, 0) == -2);
+    problem.struct_size = 0;
+    assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == -1);
+    problem.struct_size = sizeof(problem);
     assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == 0);
     const double lateral = ((0.6932 * 8.0) / 2.0 * 0.5) / acos(-1.0);
-    const double fluence = lateral * 15.0;
+    const double fluence = lateral *
+        (15.0 + exp(-1.5 * ((0.6932 * 8.0) / 2.0 * 0.5)));
     assert(fabs(output.absorbed_dose - fluence * 2.0) < 1.0e-12);
     assert(output.alpha == 0.0);
 #ifdef FDCB_TEST_REQUIRE_ACCELERATOR
@@ -104,6 +119,29 @@ int main(void) {
     assert(accelerator_output.alpha == 0.0);
     problem.voxel_voi = voxel_voi;
 #endif
+
+    const int16_t extrapolated_ct[1] = {2};
+    const double extrapolated_hlut_x[2] = {0.0, 1.0};
+    const double extrapolated_hlut_y[2] = {1.0, 2.0};
+    const ClinicalDoseDDDEntryV1 extrapolated_ddd[2] = {
+        {0.0, 0.0, 1.0, 0.0, 1.0},
+        {1.0, 1.0, 1.0, 0.0, 1.0}
+    };
+    problem.ct_data = extrapolated_ct;
+    problem.hlut_x = extrapolated_hlut_x;
+    problem.hlut_y = extrapolated_hlut_y;
+    problem.ddd_entries = extrapolated_ddd;
+    assert(trip_clinical_dose_compute_v1(&problem, &output, 1) == 0);
+    assert(fabs(output.absorbed_dose - fluence * 0.15) < 1.0e-12);
+#ifdef FDCB_TEST_REQUIRE_ACCELERATOR
+    assert(trip_clinical_dose_compute_accelerator_v1(
+        &problem, &accelerator_output, 1) == 0);
+    assert(fabs(accelerator_output.absorbed_dose - output.absorbed_dose) < 1.0e-12);
+#endif
+    problem.ct_data = ct_data;
+    problem.hlut_x = hlut_x;
+    problem.hlut_y = hlut_y;
+    problem.ddd_entries = ddd_entries;
 
     problem.flags = CLINICAL_DOSE_BIOLOGICAL;
     problem.biology_model = CLINICAL_DOSE_BIOLOGY_LOW_DOSE;

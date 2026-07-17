@@ -3,7 +3,7 @@
 from layout import Idx, TensorLayout, TileTensor, row_major
 from std.algorithm import parallelize
 from std.atomic import Atomic, Ordering
-from std.gpu import WARP_SIZE, barrier, global_idx, lane_id, thread_idx
+from std.gpu import barrier, global_idx, lane_id, thread_idx
 from std.gpu.host import DeviceBuffer, DeviceContext
 from std.gpu.memory import AddressSpace
 from std.gpu.primitives import warp
@@ -24,6 +24,7 @@ from fdcb_matrix_accelerator import FDCBMatrixStorageV1
 
 comptime FDCB_ACCELERATOR_BLOCK_SIZE = 128
 comptime FDCB_REDUCTION_BLOCK_SIZE = 256
+comptime FDCB_SPARSE_GROUP_SIZE = 32
 comptime FDCB_ACCELERATOR_MIXED32 = get_defined_bool["FDCB_MIXED32", False]()
 comptime FDCB_ACCELERATOR_HOST_THREADS = get_defined_int[
     "FDCB_PACK_THREADS", 12
@@ -74,11 +75,18 @@ def _pack_value(value: Float64) -> Scalar[FDCB_ACCELERATOR_DTYPE]:
 def fdcb_accelerator_warp_sum(
     value: Scalar[FDCB_ACCELERATOR_DTYPE],
 ) -> Scalar[FDCB_ACCELERATOR_DTYPE]:
+    var group_lane = Int(lane_id()) % FDCB_SPARSE_GROUP_SIZE
+    var offset = UInt32(FDCB_SPARSE_GROUP_SIZE // 2)
     comptime if FDCB_ACCELERATOR_MIXED32:
-        return warp.sum(value)
+        var total = value
+        while offset > UInt32(0):
+            var other = warp.shuffle_down(total, offset)
+            if group_lane < Int(offset):
+                total += other
+            offset >>= 1
+        return total
     else:
         var total = value
-        var offset = UInt32(WARP_SIZE // 2)
         while offset > UInt32(0):
             var bits = bitcast[DType.uint64](Float64(total))
             var low = UInt32(bits & UInt64(0xFFFFFFFF))
@@ -86,7 +94,7 @@ def fdcb_accelerator_warp_sum(
             var other_bits = UInt64(warp.shuffle_down(low, offset)) | (
                 UInt64(warp.shuffle_down(high, offset)) << 32
             )
-            if Int(lane_id()) < Int(offset):
+            if group_lane < Int(offset):
                 total += Scalar[FDCB_ACCELERATOR_DTYPE](
                     bitcast[DType.float64](other_bits)
                 )
@@ -122,25 +130,96 @@ struct FDCBAcceleratorMetrics(Copyable, Movable):
     var gradient_norm: Float64
 
 
-def _copy_list_to_device[
+@fieldwise_init
+struct FDCBExactStepTerms(Copyable, Movable):
+    var numerator: Float64
+    var denominator: Float64
+
+
+@fieldwise_init
+struct FDCBAcceleratorShardV1(Copyable, Movable):
+    var voxel_offset: Int
+    var voxel_count: Int
+
+
+def fdcb_device_shards(
+    problem: FDCBProblemV1, device_count: Int
+) raises -> List[FDCBAcceleratorShardV1]:
+    """Split whole voxels by sparse coefficient work."""
+    var voxel_count = len(problem.voxels)
+    if device_count < 2 or device_count > 3:
+        raise Error("multi-device FDCB requires two or three devices")
+    if voxel_count < device_count:
+        raise Error("multi-device FDCB has fewer voxels than devices")
+    var total = UInt64(0)
+    for packed_slice in problem.slices:
+        if packed_slice.coefficient_offset != total:
+            raise Error(
+                "multi-device FDCB requires contiguous coefficient ownership"
+            )
+        total += UInt64(packed_slice.coefficient_count)
+    if total != UInt64(len(problem.coefficients)):
+        raise Error("multi-device FDCB coefficients are not fully owned")
+    var shards = List[FDCBAcceleratorShardV1]()
+    shards.reserve(device_count)
+    var cumulative = UInt64(0)
+    var start = 0
+    for voxel in range(voxel_count):
+        var scenario_base = voxel * Int(problem.scenario_count)
+        for scenario in range(Int(problem.scenario_count)):
+            var packed_scenario = problem.voxel_scenarios[
+                scenario_base + scenario
+            ].copy()
+            for local_slice in range(Int(packed_scenario.slice_count)):
+                cumulative += UInt64(
+                    problem.slices[
+                        Int(packed_scenario.slice_offset) + local_slice
+                    ].coefficient_count
+                )
+        var boundary = voxel + 1
+        var remaining_shards = device_count - len(shards) - 1
+        if (
+            remaining_shards > 0
+            and boundary > start
+            and voxel_count - boundary >= remaining_shards
+            and cumulative * UInt64(device_count)
+            >= total * UInt64(len(shards) + 1)
+        ):
+            shards.append(FDCBAcceleratorShardV1(start, boundary - start))
+            start = boundary
+    shards.append(FDCBAcceleratorShardV1(start, voxel_count - start))
+    if len(shards) != device_count:
+        raise Error("multi-device FDCB could not form nonempty shards")
+    return shards^
+
+
+def fdcb_two_device_shards(
+    problem: FDCBProblemV1,
+) raises -> Tuple[FDCBAcceleratorShardV1, FDCBAcceleratorShardV1]:
+    var shards = fdcb_device_shards(problem, 2)
+    return (shards[0].copy(), shards[1].copy())
+
+
+def _copy_list_range_to_device[
     dtype: DType
-](context: DeviceContext, values: List[Scalar[dtype]]) raises -> DeviceBuffer[
-    dtype
-]:
-    """Upload a contiguous Mojo list without a second host allocation."""
-    var count = len(values)
+](
+    context: DeviceContext,
+    values: List[Scalar[dtype]],
+    offset: Int,
+    count: Int,
+) raises -> DeviceBuffer[dtype]:
     var device = context.enqueue_create_buffer[dtype](count)
-    context.enqueue_copy[dtype](device, values.unsafe_ptr())
+    context.enqueue_copy[dtype](device, values.unsafe_ptr() + offset)
     context.synchronize()
     return device^
 
 
-def _copy_coefficients_to_device(
-    context: DeviceContext, values: List[Float64]
+def _copy_coefficient_range_to_device(
+    context: DeviceContext,
+    values: List[Float64],
+    offset: Int,
+    count: Int,
 ) raises -> DeviceBuffer[FDCB_ACCELERATOR_DTYPE]:
-    """Store reference coefficients exactly; mixed32 narrows explicitly."""
-    var count = len(values)
-    var device = context.enqueue_create_buffer[FDCB_ACCELERATOR_DTYPE](count)
     comptime if FDCB_ACCELERATOR_MIXED32:
         var host = context.enqueue_create_host_buffer[FDCB_ACCELERATOR_DTYPE](
             count
@@ -148,15 +227,23 @@ def _copy_coefficients_to_device(
         var tensor = TileTensor(host, row_major(Idx(count)))
         comptime assert tensor.flat_rank == 1
         for i in range(count):
-            tensor[i] = Scalar[FDCB_ACCELERATOR_DTYPE](values[i])
+            tensor[i] = Scalar[FDCB_ACCELERATOR_DTYPE](values[offset + i])
+        var device = context.enqueue_create_buffer[FDCB_ACCELERATOR_DTYPE](
+            count
+        )
         context.enqueue_copy(device, host)
+        context.synchronize()
+        return device^
     else:
-        var source = values.unsafe_ptr().bitcast[
+        var device = context.enqueue_create_buffer[FDCB_ACCELERATOR_DTYPE](
+            count
+        )
+        var source = (values.unsafe_ptr() + offset).bitcast[
             Scalar[FDCB_ACCELERATOR_DTYPE]
         ]()
         context.enqueue_copy[FDCB_ACCELERATOR_DTYPE](device, source)
-    context.synchronize()
-    return device^
+        context.synchronize()
+        return device^
 
 
 @always_inline
@@ -197,8 +284,8 @@ def sparse_slice_dot_kernel[
     comptime assert coefficients.flat_rank == 1
     comptime assert particles.flat_rank == 1
     comptime assert output.flat_rank == 1
-    var lane = lane_id()
-    var slice = global_idx.x // WARP_SIZE
+    var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
+    var slice = global_idx.x // FDCB_SPARSE_GROUP_SIZE
     var total: Scalar[FDCB_ACCELERATOR_DTYPE] = 0.0
     if slice < slice_count:
         var metadata = rebind[Scalar[DType.uint64]](slice_metadata[slice])
@@ -208,7 +295,7 @@ def sparse_slice_dot_kernel[
         )
         var offset = Int(rebind[Scalar[DType.uint64]](slice_offsets[slice]))
         var count = Int(metadata & UInt64(0xFFFFFFFF))
-        for entry in range(Int(lane), count, WARP_SIZE):
+        for entry in range(lane, count, FDCB_SPARSE_GROUP_SIZE):
             var coefficient = offset + entry
             var point = point_base + _coefficient_point(
                 coefficient_points, coefficient
@@ -226,7 +313,7 @@ def sparse_slice_dot_kernel[
     var thread = thread_idx.x
     sums[thread] = total
     barrier()
-    var stride = WARP_SIZE // 2
+    var stride = FDCB_SPARSE_GROUP_SIZE // 2
     while stride > 0:
         if lane < stride:
             sums[thread] += sums[thread + stride]
@@ -284,8 +371,8 @@ def biological_moment_fused_kernel[
     comptime assert scenario_state.flat_rank == 1
     comptime assert slice_factors.flat_rank == 1
     comptime assert moments.flat_rank == 1
-    var lane = lane_id()
-    var scenario = global_idx.x // WARP_SIZE
+    var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
+    var scenario = global_idx.x // FDCB_SPARSE_GROUP_SIZE
     if scenario >= scenario_count:
         return
     var state = scenario * 4
@@ -318,7 +405,7 @@ def biological_moment_fused_kernel[
         )
         var coefficient_count = Int(metadata & UInt64(0xFFFFFFFF))
         var dot: Scalar[FDCB_ACCELERATOR_DTYPE] = 0.0
-        for entry in range(Int(lane), coefficient_count, WARP_SIZE):
+        for entry in range(lane, coefficient_count, FDCB_SPARSE_GROUP_SIZE):
             var coefficient = coefficient_offset + entry
             var point = point_base + _coefficient_point(
                 coefficient_points, coefficient
@@ -836,7 +923,7 @@ def sparse_gradient_backprojection_kernel[
     comptime assert slice_gradient.flat_rank == 1
     comptime assert active_slices.flat_rank == 1
     comptime assert gradient.flat_rank == 1
-    var active = global_idx.x // WARP_SIZE
+    var active = global_idx.x // FDCB_SPARSE_GROUP_SIZE
     if active >= active_count:
         return
     var slice = Int(rebind[Scalar[DType.uint32]](active_slices[active]))
@@ -850,7 +937,8 @@ def sparse_gradient_backprojection_kernel[
     )
     var offset = Int(rebind[Scalar[DType.uint64]](slice_offsets[slice]))
     var count = Int(metadata & UInt64(0xFFFFFFFF))
-    for entry in range(Int(lane_id()), count, WARP_SIZE):
+    var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
+    for entry in range(lane, count, FDCB_SPARSE_GROUP_SIZE):
         var coefficient = offset + entry
         var point = point_base + _coefficient_point(
             coefficient_points, coefficient
@@ -984,7 +1072,7 @@ def bootstrap_backprojection_kernel[
     comptime assert slice_gradient.flat_rank == 1
     comptime assert active_slices.flat_rank == 1
     comptime assert gradient.flat_rank == 1
-    var active = global_idx.x // WARP_SIZE
+    var active = global_idx.x // FDCB_SPARSE_GROUP_SIZE
     if active >= active_count:
         return
     var slice = Int(rebind[Scalar[DType.uint32]](active_slices[active]))
@@ -996,7 +1084,8 @@ def bootstrap_backprojection_kernel[
     )
     var offset = Int(rebind[Scalar[DType.uint64]](slice_offsets[slice]))
     var count = Int(metadata & UInt64(0xFFFFFFFF))
-    for entry in range(Int(lane_id()), count, WARP_SIZE):
+    var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
+    for entry in range(lane, count, FDCB_SPARSE_GROUP_SIZE):
         var coefficient = offset + entry
         var point = point_base + _coefficient_point(
             coefficient_points, coefficient
@@ -1144,8 +1233,8 @@ def exact_step_terms_kernel[
     comptime assert voxel_results.flat_rank == 1
     comptime assert scenario_indices.flat_rank == 1
     comptime assert terms.flat_rank == 1
-    var lane = lane_id()
-    var voxel = global_idx.x // WARP_SIZE
+    var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
+    var voxel = global_idx.x // FDCB_SPARSE_GROUP_SIZE
     if voxel >= voxel_count:
         return
     var data = voxel * 13
@@ -1197,7 +1286,7 @@ def exact_step_terms_kernel[
             )
             var coefficient_count = Int(metadata & UInt64(0xFFFFFFFF))
             var dot: Scalar[FDCB_ACCELERATOR_DTYPE] = 0.0
-            for entry in range(Int(lane), coefficient_count, WARP_SIZE):
+            for entry in range(lane, coefficient_count, FDCB_SPARSE_GROUP_SIZE):
                 var coefficient = coefficient_offset + entry
                 var point = point_base + _coefficient_point(
                     coefficient_points, coefficient
@@ -1295,6 +1384,45 @@ struct FDCBAccelerator(Movable):
             problem,
             problem.particles.unsafe_ptr().bitcast[NoneType](),
             0,
+            0,
+            0,
+            len(problem.voxels),
+            True,
+        )
+
+    def __init__(
+        out self,
+        problem: FDCBProblemV1,
+        device_id: Int,
+        voxel_offset: Int,
+        voxel_count: Int,
+    ) raises:
+        self = FDCBAccelerator(
+            problem,
+            problem.particles.unsafe_ptr().bitcast[NoneType](),
+            0,
+            device_id,
+            voxel_offset,
+            voxel_count,
+            True,
+        )
+
+    def __init__(
+        out self,
+        problem: FDCBProblemV1,
+        device_id: Int,
+        voxel_offset: Int,
+        voxel_count: Int,
+        validate_problem: Bool,
+    ) raises:
+        self = FDCBAccelerator(
+            problem,
+            problem.particles.unsafe_ptr().bitcast[NoneType](),
+            0,
+            device_id,
+            voxel_offset,
+            voxel_count,
+            validate_problem,
         )
 
     def __init__[
@@ -1305,20 +1433,59 @@ struct FDCBAccelerator(Movable):
         matrix_storage: OpaquePointer[origin],
         external_coefficient_count: Int,
     ) raises:
-        comptime if FDCB_ACCELERATOR_MIXED32:
-            problem.validate(
-                FDCB_PRECISION_MIXED32,
-                UInt64(external_coefficient_count) if external_coefficient_count
-                > 0 else UInt64.MAX,
-            )
-        else:
-            problem.validate(
-                FDCB_PRECISION_REFERENCE,
-                UInt64(external_coefficient_count) if external_coefficient_count
-                > 0 else UInt64.MAX,
-            )
+        self = FDCBAccelerator(
+            problem,
+            matrix_storage,
+            external_coefficient_count,
+            0,
+            0,
+            len(problem.voxels),
+            True,
+        )
+
+    def __init__[
+        origin: Origin
+    ](
+        out self,
+        problem: FDCBProblemV1,
+        matrix_storage: OpaquePointer[origin],
+        external_coefficient_count: Int,
+        device_id: Int,
+        voxel_offset: Int,
+        voxel_count: Int,
+        validate_problem: Bool,
+    ) raises:
+        if validate_problem:
+            comptime if FDCB_ACCELERATOR_MIXED32:
+                problem.validate(
+                    FDCB_PRECISION_MIXED32,
+                    UInt64(
+                        external_coefficient_count
+                    ) if external_coefficient_count
+                    > 0 else UInt64.MAX,
+                )
+            else:
+                problem.validate(
+                    FDCB_PRECISION_REFERENCE,
+                    UInt64(
+                        external_coefficient_count
+                    ) if external_coefficient_count
+                    > 0 else UInt64.MAX,
+                )
         if len(problem.slices) == 0:
             raise Error("packed FDCB accelerator requires sparse slices")
+        if (
+            voxel_offset < 0
+            or voxel_count < 1
+            or (voxel_offset + voxel_count > len(problem.voxels))
+        ):
+            raise Error("invalid FDCB accelerator voxel shard")
+        if external_coefficient_count > 0 and (
+            device_id != 0
+            or voxel_offset != 0
+            or voxel_count != len(problem.voxels)
+        ):
+            raise Error("external accelerator matrix cannot be sharded")
         if external_coefficient_count > 0:
             comptime if FDCB_ACCELERATOR_MIXED32:
                 raise Error(
@@ -1327,16 +1494,39 @@ struct FDCBAccelerator(Movable):
             var matrix = matrix_storage.bitcast[FDCBMatrixStorageV1]()
             self.context = DeviceContext(copy=matrix[].context)
         else:
-            self.context = DeviceContext()
+            self.context = DeviceContext(device_id=device_id)
+        var scenario_offset = voxel_offset * Int(problem.scenario_count)
+        var scenario_count = voxel_count * Int(problem.scenario_count)
+        var first_scenario = problem.voxel_scenarios[scenario_offset].copy()
+        var last_scenario = problem.voxel_scenarios[
+            scenario_offset + scenario_count - 1
+        ].copy()
+        var slice_offset = Int(first_scenario.slice_offset)
+        var slice_end = Int(last_scenario.slice_offset) + Int(
+            last_scenario.slice_count
+        )
+        var coefficient_offset = Int(
+            problem.slices[slice_offset].coefficient_offset
+        )
+        var coefficient_end = coefficient_offset
+        for packed_slice in range(slice_offset, slice_end):
+            var source = problem.slices[packed_slice].copy()
+            if Int(source.coefficient_offset) < coefficient_offset:
+                coefficient_offset = Int(source.coefficient_offset)
+            var source_end = Int(source.coefficient_offset) + Int(
+                source.coefficient_count
+            )
+            if source_end > coefficient_end:
+                coefficient_end = source_end
         self.field_slice_count = len(problem.field_slices)
-        self.slice_count = len(problem.slices)
-        self.coefficient_count = len(problem.coefficients)
+        self.slice_count = slice_end - slice_offset
+        self.coefficient_count = coefficient_end - coefficient_offset
         if external_coefficient_count > 0:
             self.coefficient_count = external_coefficient_count
         self.point_count = len(problem.particles)
-        self.voxel_count = len(problem.voxels)
+        self.voxel_count = voxel_count
         self.scenarios_per_voxel = Int(problem.scenario_count)
-        self.voxel_scenario_count = len(problem.voxel_scenarios)
+        self.voxel_scenario_count = scenario_count
         var coefficient_point_device: DeviceBuffer[DType.uint16]
         var coefficient_device: DeviceBuffer[FDCB_ACCELERATOR_DTYPE]
         if external_coefficient_count > 0:
@@ -1347,11 +1537,17 @@ struct FDCBAccelerator(Movable):
                 FDCB_ACCELERATOR_DTYPE
             ](1)
         else:
-            coefficient_point_device = _copy_list_to_device[DType.uint16](
-                self.context, problem.coefficient_point_indices
+            coefficient_point_device = _copy_list_range_to_device[DType.uint16](
+                self.context,
+                problem.coefficient_point_indices,
+                coefficient_offset,
+                self.coefficient_count,
             )
-            coefficient_device = _copy_coefficients_to_device(
-                self.context, problem.coefficients
+            coefficient_device = _copy_coefficient_range_to_device(
+                self.context,
+                problem.coefficients,
+                coefficient_offset,
+                self.coefficient_count,
             )
         var metric_count = self.voxel_count
         if self.point_count > metric_count:
@@ -1365,7 +1561,9 @@ struct FDCBAccelerator(Movable):
             for scenario in range(self.scenarios_per_voxel):
                 var count = Int(
                     problem.voxel_scenarios[
-                        voxel * self.scenarios_per_voxel + scenario
+                        scenario_offset
+                        + voxel * self.scenarios_per_voxel
+                        + scenario
                     ].slice_count
                 )
                 if count > maximum_slices:
@@ -1373,7 +1571,9 @@ struct FDCBAccelerator(Movable):
             var passes = 1
             if (
                 problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX
-            ) != UInt32(0) and problem.voxels[voxel].prescribed_dose > 0.0:
+            ) != UInt32(0) and problem.voxels[
+                voxel_offset + voxel
+            ].prescribed_dose > 0.0:
                 passes = 2
             active_bound += passes * maximum_slices
         self.active_slice_capacity = active_bound
@@ -1458,48 +1658,55 @@ struct FDCBAccelerator(Movable):
 
         @parameter
         def pack_slice(i: Int):
+            var source = problem.slices[slice_offset + i].copy()
             slice_metadata_tensor[i] = (
-                UInt64(problem.slices[i].field_slice_index) << 32
-            ) | UInt64(problem.slices[i].coefficient_count)
-            slice_offset_tensor[i] = problem.slices[i].coefficient_offset
-            var factor = i * 5
-            slice_factor_tensor[factor] = _pack_value(
-                problem.slices[i].dose_coefficient
+                UInt64(source.field_slice_index) << 32
+            ) | UInt64(source.coefficient_count)
+            slice_offset_tensor[i] = UInt64(
+                Int(source.coefficient_offset) - coefficient_offset
             )
+            var factor = i * 5
+            slice_factor_tensor[factor] = _pack_value(source.dose_coefficient)
             slice_factor_tensor[factor + 1] = _pack_value(
-                problem.slices[i].alpha_coefficient
+                source.alpha_coefficient
             )
             slice_factor_tensor[factor + 2] = _pack_value(
-                problem.slices[i].sqrt_beta_coefficient
+                source.sqrt_beta_coefficient
             )
             slice_factor_tensor[factor + 3] = _pack_value(
-                problem.slices[i].let_mix_coefficient
+                source.let_mix_coefficient
             )
             slice_factor_tensor[factor + 4] = _pack_value(
-                problem.slices[i].let_bar_coefficient
+                source.let_bar_coefficient
             )
 
         parallelize[pack_slice](self.slice_count, FDCB_ACCELERATOR_HOST_THREADS)
         for i in range(self.point_count):
             active_tensor[i] = problem.point_active[i]
         for i in range(self.voxel_scenario_count):
-            scenario_offset_tensor[i] = problem.voxel_scenarios[i].slice_offset
-            scenario_count_tensor[i] = problem.voxel_scenarios[i].slice_count
+            var source_index = scenario_offset + i
+            scenario_offset_tensor[i] = UInt64(
+                Int(problem.voxel_scenarios[source_index].slice_offset)
+                - slice_offset
+            )
+            scenario_count_tensor[i] = problem.voxel_scenarios[
+                source_index
+            ].slice_count
             var state = i * 4
             scenario_state_tensor[state] = _pack_value(
-                problem.scenario_states[i].dose_minor
+                problem.scenario_states[source_index].dose_minor
             )
             scenario_state_tensor[state + 1] = _pack_value(
-                problem.scenario_states[i].alpha_minor
+                problem.scenario_states[source_index].alpha_minor
             )
             scenario_state_tensor[state + 2] = _pack_value(
-                problem.scenario_states[i].sqrt_beta_minor
+                problem.scenario_states[source_index].sqrt_beta_minor
             )
             scenario_state_tensor[state + 3] = _pack_value(
-                problem.scenario_states[i].let_mix_minor
+                problem.scenario_states[source_index].let_mix_minor
             )
         for i in range(self.voxel_count):
-            var voxel = problem.voxels[i].copy()
+            var voxel = problem.voxels[voxel_offset + i].copy()
             var offset = i * 13
             voxel_tensor[offset] = _pack_value(voxel.prescribed_dose)
             voxel_tensor[offset + 1] = _pack_value(voxel.dose_weight)
@@ -1645,7 +1852,9 @@ struct FDCBAccelerator(Movable):
             TileTensor(self.slice_dot_output, slice_layout),
             self.slice_count,
             grid_dim=(
-                self.slice_count * WARP_SIZE + FDCB_ACCELERATOR_BLOCK_SIZE - 1
+                self.slice_count * FDCB_SPARSE_GROUP_SIZE
+                + FDCB_ACCELERATOR_BLOCK_SIZE
+                - 1
             )
             // FDCB_ACCELERATOR_BLOCK_SIZE,
             block_dim=FDCB_ACCELERATOR_BLOCK_SIZE,
@@ -1732,7 +1941,9 @@ struct FDCBAccelerator(Movable):
                 TileTensor(self.gradient, point_layout),
                 active_count,
                 grid_dim=(
-                    active_count * WARP_SIZE + FDCB_ACCELERATOR_BLOCK_SIZE - 1
+                    active_count * FDCB_SPARSE_GROUP_SIZE
+                    + FDCB_ACCELERATOR_BLOCK_SIZE
+                    - 1
                 )
                 // FDCB_ACCELERATOR_BLOCK_SIZE,
                 block_dim=FDCB_ACCELERATOR_BLOCK_SIZE,
@@ -1793,7 +2004,7 @@ struct FDCBAccelerator(Movable):
             TileTensor(self.scenario_moments, moment_layout),
             self.voxel_scenario_count,
             grid_dim=(
-                self.voxel_scenario_count * WARP_SIZE
+                self.voxel_scenario_count * FDCB_SPARSE_GROUP_SIZE
                 + FDCB_ACCELERATOR_BLOCK_SIZE
                 - 1
             )
@@ -1801,7 +2012,7 @@ struct FDCBAccelerator(Movable):
             block_dim=FDCB_ACCELERATOR_BLOCK_SIZE,
         )
 
-    def exact_step(mut self, direction: List[Float64]) raises -> Float64:
+    def enqueue_exact_step(mut self, direction: List[Float64]) raises:
         self._enqueue_particles(direction)
         var field_layout = row_major(Idx(self.field_slice_count))
         var voxel_layout = row_major(Idx(self.voxel_count * 13))
@@ -1846,11 +2057,18 @@ struct FDCBAccelerator(Movable):
             self.flags,
             Scalar[FDCB_ACCELERATOR_DTYPE](self.fractions),
             grid_dim=(
-                self.voxel_count * WARP_SIZE + FDCB_ACCELERATOR_BLOCK_SIZE - 1
+                self.voxel_count * FDCB_SPARSE_GROUP_SIZE
+                + FDCB_ACCELERATOR_BLOCK_SIZE
+                - 1
             )
             // FDCB_ACCELERATOR_BLOCK_SIZE,
             block_dim=FDCB_ACCELERATOR_BLOCK_SIZE,
         )
+
+    def collect_exact_step_terms(
+        mut self,
+    ) raises -> FDCBExactStepTerms:
+        var term_layout = row_major(Idx(self.voxel_count * 2))
         var numerator = 0.0
         var denominator = 0.0
         with self.exact_step_terms.map_to_host() as mapped:
@@ -1859,11 +2077,18 @@ struct FDCBAccelerator(Movable):
             for voxel in range(self.voxel_count):
                 numerator += Float64(tensor[voxel * 2])
                 denominator += Float64(tensor[voxel * 2 + 1])
+        return FDCBExactStepTerms(numerator, denominator)
+
+    def exact_step(mut self, direction: List[Float64]) raises -> Float64:
+        self.enqueue_exact_step(direction)
+        var terms = self.collect_exact_step_terms()
+        var numerator = terms.numerator
+        var denominator = terms.denominator
         if denominator == 0.0:
             return 0.0
         return numerator / denominator
 
-    def _reduced_metrics(mut self) raises -> FDCBAcceleratorMetrics:
+    def _enqueue_reduced_metrics(mut self) raises:
         var result_layout = row_major(Idx(self.voxel_count * 4))
         var point_layout = row_major(Idx(self.point_count))
         var partial_layout = row_major(Idx(self.metric_partial_count * 3))
@@ -1881,6 +2106,11 @@ struct FDCBAccelerator(Movable):
             grid_dim=self.metric_partial_count,
             block_dim=FDCB_REDUCTION_BLOCK_SIZE,
         )
+
+    def _collect_reduced_metrics(
+        mut self,
+    ) raises -> FDCBAcceleratorMetrics:
+        var partial_layout = row_major(Idx(self.metric_partial_count * 3))
         var chi2 = 0.0
         var weighted = 0.0
         var norm2 = 0.0
@@ -1893,11 +2123,7 @@ struct FDCBAccelerator(Movable):
                 norm2 += Float64(tensor[block * 3 + 2])
         return FDCBAcceleratorMetrics(chi2, weighted, fdcb_sqrt64(norm2))
 
-    def evaluation(
-        mut self,
-        particles: List[Float64],
-        include_diagnostics: Bool = True,
-    ) raises -> FDCBAcceleratorEvaluation:
+    def enqueue_evaluation_front(mut self, particles: List[Float64]) raises:
         self._enqueue_scenario_moments(particles)
         var biological = self.flags & FDCB_FLAG_BIOLOGICAL
         var voxel_layout = row_major(Idx(self.voxel_count * 13))
@@ -1979,6 +2205,11 @@ struct FDCBAccelerator(Movable):
             // FDCB_ACCELERATOR_BLOCK_SIZE,
             block_dim=FDCB_ACCELERATOR_BLOCK_SIZE,
         )
+
+    def enqueue_evaluation_backprojection(mut self) raises:
+        var count_layout = row_major(Idx(1))
+        var slice_layout = row_major(Idx(self.slice_count))
+        var active_layout = row_major(Idx(self.active_slice_capacity))
         var active_count: Int
         with self.active_slice_count.map_to_host() as mapped:
             var tensor = TileTensor(mapped, count_layout)
@@ -2010,12 +2241,23 @@ struct FDCBAccelerator(Movable):
                 TileTensor(self.gradient, point_layout),
                 active_count,
                 grid_dim=(
-                    active_count * WARP_SIZE + FDCB_ACCELERATOR_BLOCK_SIZE - 1
+                    active_count * FDCB_SPARSE_GROUP_SIZE
+                    + FDCB_ACCELERATOR_BLOCK_SIZE
+                    - 1
                 )
                 // FDCB_ACCELERATOR_BLOCK_SIZE,
                 block_dim=FDCB_ACCELERATOR_BLOCK_SIZE,
             )
-        var metrics = self._reduced_metrics()
+        self._enqueue_reduced_metrics()
+
+    def collect_evaluation(
+        mut self, include_diagnostics: Bool = True
+    ) raises -> FDCBAcceleratorEvaluation:
+        var bio_layout = row_major(Idx(self.voxel_scenario_count * 4))
+        var result_layout = row_major(Idx(self.voxel_count * 4))
+        var index_layout = row_major(Idx(self.voxel_count * 2))
+        var point_layout = row_major(Idx(self.point_count))
+        var metrics = self._collect_reduced_metrics()
         var scenario_bio = List[Float64]()
         if include_diagnostics:
             scenario_bio.reserve(self.voxel_scenario_count * 4)
@@ -2073,3 +2315,12 @@ struct FDCBAccelerator(Movable):
             metrics.weighted_dose2,
             metrics.gradient_norm,
         )
+
+    def evaluation(
+        mut self,
+        particles: List[Float64],
+        include_diagnostics: Bool = True,
+    ) raises -> FDCBAcceleratorEvaluation:
+        self.enqueue_evaluation_front(particles)
+        self.enqueue_evaluation_backprojection()
+        return self.collect_evaluation(include_diagnostics)

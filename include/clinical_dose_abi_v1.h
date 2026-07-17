@@ -58,7 +58,7 @@ typedef struct {
 
 typedef struct {
     ClinicalDoseGridV1 grid;
-    uint64_t data_offset;
+    uint64_t data_offset, x_boundary_offset, y_boundary_offset, z_boundary_offset;
     double pmod, pore_size;
     int32_t byte_swap;
 } ClinicalDoseCTStateV1;
@@ -90,12 +90,15 @@ typedef struct {
     uint32_t energy_count, point_count;
     uint32_t ddd_table_count, ddd_entry_count;
     uint32_t bio_table_count, bio_entry_count, voi_count;
-    uint32_t hlut_count, algorithm, biology_model, max_threads, reserved;
-    uint64_t ct_value_count;
+    uint32_t hlut_count, algorithm, biology_model, max_threads, struct_size;
+    uint64_t ct_value_count, ct_boundary_count, dose_axis_count;
+    uint64_t dose_x_offset, dose_y_offset, dose_z_offset;
     ClinicalDoseGridV1 dose_grid;
     const int32_t *voxel_voi;
     const ClinicalDoseCTStateV1 *ct_states;
     const int16_t *ct_data;
+    const double *ct_boundaries;
+    const double *dose_axis_centers;
     const double *hlut_x, *hlut_y;
     const ClinicalDoseGridFieldV1 *grid_fields;
     const ClinicalDoseFieldV1 *fields;

@@ -14,10 +14,12 @@ canonical local and Hydra paths.
 |---|---|
 | CPU FDCB | P101 3D robust biological plan stops at iteration 271 and writes byte-identical RSTs. |
 | NVIDIA FDCB | P101 ten-state, nine-scenario 4D robust plan stops at iteration 120 and writes byte-identical RSTs on H200. |
+| NVIDIA multi-GPU | The same 4D plan is coefficient-balanced across two H200s and remains byte-identical. |
 | CPU dose | Full static P101 physical/biological cubes match within one/two Float32 output ULPs. |
 | NVIDIA dose | Same complete static case and support validated on H200. |
 | 4D dose | P101 ten-state perfect-rescan physical/biological cubes are byte-identical to `trip_temp` on H200. |
-| AMD | The shared kernels compile for gfx908 with the custom toolchain; queued MI100 runtime validation is not yet a parity claim. |
+| ARC | CAK257 stops at iteration 70 and writes 180 byte-identical RSTs on H200; physical and biological dose now agree at Float64 roundoff. |
+| AMD | P101 3D stops at iteration 271 with byte-identical RSTs and DVH on MI100; dose agrees at Float32 output-rounding level. |
 | Apple | Kernel lowering has been probed. Runtime validation remains experimental and lowest priority. |
 
 Canonical measurements use 12 optimizer threads. The latest H200 4D run used
@@ -25,6 +27,15 @@ Canonical measurements use 12 optimizer threads. The latest H200 4D run used
 wall time versus 476.751 s for `trip_temp`, and produced two byte-identical
 RSTs. Its full Mojo optimization call took 6.764 s. Full details are in
 [`docs/4d-robust.md`](docs/4d-robust.md).
+
+The memory-scaled two-H200 path keeps each voxel's scenarios together and
+stores only that shard's slices and coefficients on each GPU. Job 22598 used
+32,605 MiB of reserved VRAM per H200, completed optimization in 13.604 s and
+wrote the same byte-identical RSTs. Its 49.311 s process wall time includes
+TRiP's CPU matrix construction and the packed host copy; the direct
+single-device matrix path remains faster when one GPU has enough memory.
+Peak host RSS was 139,720,980 KiB, so this solves per-GPU capacity but not yet
+low-host-memory execution.
 
 For the static dose case, CPU `DoseCmd` fell from 109.20 s to 63.29 s. H200
 `DoseCmd` measured 15.52--19.31 s versus 236.39 s for the server CPU reference.
@@ -45,6 +56,8 @@ for test in test_fdcb_problem test_fdcb_cpu test_fdcb_optimize \
   test_fdcb_min_particles test_fdcb_accelerator; do
   $MOJO run -I . -O3 -D FDCB_CPU_THREADS=12 tests/$test.mojo
 done
+# Requires two visible accelerators:
+$MOJO run -I . -O3 tests/test_fdcb_two_accelerators.mojo
 $MOJO run -I . -O3 -D FDCB_CPU_THREADS=12 -D FDCB_MIXED32=true \
   tests/test_fdcb_accelerator_mixed32.mojo
 $MOJO run -I . -O3 tests/test_exec_parser.mojo
@@ -63,6 +76,38 @@ Hydra uses one persistently patched `trip_temp` build. Apply both
 contains CRLF files. Use `build_h200.sh` after source changes and submit
 `run_h200_4d.sh` for run-only validation. The runner does not copy or rebuild
 either repository.
+
+`run_h200_4d_2gpu.sh` requests two H200s and selects the sharded optimizer with
+`TRIP_FDCB_MOJO_DEVICES=2`. Multi-device V1 uses the canonical CPU-built
+Float64 matrix; direct accelerator matrix storage is intentionally
+single-device.
+
+ARC validation uses a linked `trip_temp` `Arc-dev` worktree at commit
+`347494d4`. Apply the common optimizer patch excluding `CMakeLists.txt` and
+`trpopt.c`, then apply `trip_arc_dev_mojo.patch`,
+`trip_arc_field_setup.patch` and the clinical-dose patch.
+`build_h200_arc.sh` builds it and `run_h200_arc.sh` runs the original CAK257
+exec from separate output directories, so its `/lustre/bio` inputs are not
+copied or modified. The runner stages generated files on node-local storage.
+To avoid one Lustre metadata operation per arc field, each result directory
+stores the 180 RSTs losslessly in `rst.tar`; dose and DVH files remain directly
+accessible. The reported wall time includes this publication step. H200 job 22380 completed
+the full reference in 104.529 s and Mojo in 49.179 s; those totals include
+variable Lustre I/O from publishing each RST separately. With archived RST
+publication, H200 job 22383 measured 21.664 s for the complete Mojo process and
+2.954 s for publishing all results, or 24.617 s total. Cached Float64 HU-to-path tables reduced ARC `FieldCmd`
+from 14.29/14.27 s in job 22379 to 2.77/2.78 s for reference/Mojo. All 180 RSTs
+and the reference physical, biological and dose-mean-LET cubes remained
+byte-identical to job 22379. Packed dose reduced Mojo `DoseCmd` from about 36 s
+to about 2 s. Full-cube physical and biological relative L2 differences are
+`1.39e-13` and `2.81e-11`; nonzero support is identical and the DVH is
+byte-identical.
+
+Dose-mean LET differs by `9.72e-4` relative L2 in 5,883 of 1,912,855 nonzero
+voxels. This is isolated to Arc-dev retaining the previous
+`sMFDCP.pdG[0]` value when a spectrum depth is out of range while zeroing the
+other biological terms. Mojo deliberately returns zero for every out-of-range
+table term instead of reproducing that stale-state behavior.
 
 ## Optimizer boundary
 
@@ -89,6 +134,20 @@ stopping rules, Fletcher-Reeves updates, backtracking and host-side
 minimum-particle policy. `complexminp` uses TRiP's captured 31-word libc RNG
 state. The initialization update is not counted as a regular iteration.
 
+The two-device evaluator partitions contiguous whole-voxel ranges near half
+the sparse coefficient count. It replicates particles and field metadata,
+keeps all robust scenarios for one voxel on one device, and sums partial
+gradients, chi-square terms and exact-step terms on the host each iteration.
+Sparse coefficient and slice arrays are not duplicated across devices.
+
+MI100 reference mode packs TRiP's canonical CPU-built Float64 matrix and then
+runs regular optimizer evaluations and clinical dose on gfx908. This avoids
+vendor-specific device `exp` differences in matrix construction while keeping
+the numeric backend shared. Hydra job 22559 reached the canonical 271-iteration
+stop, wrote byte-identical RSTs and DVH, and measured 35.097 s for optimization,
+17.47 s for `DoseCmd`, and 111.845 s process wall time. Full dose metrics are in
+[`docs/mi100.md`](docs/mi100.md).
+
 Reference mode is Float64 throughout, matching the configured `trip_temp`
 matrix and optimizer. `FDCB_MIXED32=true` is an explicit experimental build;
 it cannot silently narrow a reference problem.
@@ -108,6 +167,13 @@ storage. Static P101 and the ten-state P101 perfect-rescan path are validated.
 `tools/compare_float_cubes.c` reports raw Float32 cube support and error without
 scaling or output shaping.
 
+H200 job 22528 revalidated the current static path after restoring TRiP's field
+dose-extension cutoff. Physical and biological support was identical; relative
+L2 errors were `2.69e-10` and `1.26e-10`, with only 14 and 15 Float32 voxels
+differing by one output ULP. The DVH was byte-identical. The clinical ABI also
+carries its struct size, so a stale TRiP executable is rejected before any
+shifted descriptor can be interpreted.
+
 H200 job 22069 evaluated 41,446 packed reference-grid voxels over ten states and
 20 flattened state fields. Both 39,059,456-voxel output cubes had identical
 11,764-voxel support and were byte-identical to `trip_temp`. `DoseCmd` measured
@@ -118,9 +184,9 @@ currently dominated by packing and accelerator-transfer overhead.
 
 - deformable P101 4D-dose validation and smoothed/per-state dose output
 - robust-RBE and OER models
-- arc fields, lung modulation and specialized LET outputs
+- Arc-dev's stale out-of-range dose-mean-LET behavior, dynamic `arcangles` dose reconstruction, lung modulation and MLET output
 - all-plan, master-field and static-field optimizer modes
-- native MI100 and Apple runtime parity
+- deterministic device matrix construction/bootstrap on MI100 and Apple runtime parity
 
 Unsupported production modes must be rejected by the TRiP adapter, never
 silently approximated. `.exec` parsing in this repository is only a fail-closed

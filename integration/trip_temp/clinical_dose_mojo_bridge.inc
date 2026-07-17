@@ -5,6 +5,8 @@ struct TRPClinicalDoseMojoBuild {
    ClinicalDosePositionV1 *positions;
    ClinicalDoseCTStateV1 *ct_states;
    int16_t *ct_data;
+   double *ct_boundaries;
+   double *dose_axis_centers;
    int32_t *voxel_voi;
    ClinicalDoseGridFieldV1 *grid_fields;
    ClinicalDoseFieldV1 *fields;
@@ -20,6 +22,8 @@ struct TRPClinicalDoseMojoBuild {
 static void TRPClinicalDoseMojoFree(struct TRPClinicalDoseMojoBuild *b) {
    if ( b == NULL ) return;
    free(b->states); free(b->positions); free(b->ct_states); free(b->ct_data);
+   free(b->ct_boundaries);
+   free(b->dose_axis_centers);
    free(b->voxel_voi); free(b->grid_fields); free(b->fields);
    free(b->energies); free(b->points); free(b->ddd_tables);
    free(b->ddd_entries); free(b->bio_tables); free(b->bio_entries);
@@ -67,17 +71,19 @@ static int TRPClinicalDoseMojoRun(
    struct TRPClinicalDoseMojoBuild b = {0};
    struct STRPCUBE *main_cube = NULL, dose_grid;
    struct STRPTRAFOCALC tc;
+   struct STRPDEDX *dedx = NULL;
    struct STRPRBESPCBASE ***rs_base = NULL;
    struct STRPSPCBASE **spc_base = NULL;
    struct Node *node;
    ClinicalDoseProblemViewV1 p;
-   uint64_t ct_values=0, point_count=0, ddd_entries=0, bio_entries=0;
+   uint64_t ct_values=0, ct_boundaries=0, point_count=0, ddd_entries=0, bio_entries=0;
    uint32_t fields=0, energies=0, bio_tables=0;
    int rc=0, residual=-1, base_fields=0, dose_algorithm;
    const int four_d = (flag & TRPDOSECALC_4DCALC) != 0;
    const int biological = (dc->ulDoseObj & TRPDOSE_BITBIOL) != 0;
    const uint32_t allowed = TRPDOSE_BITPHYS | TRPDOSE_BITBIOL |
-      TRPDOSE_BITSVV | TRPDOSE_BITRBE | TRPDOSE_BITALPHA | TRPDOSE_BITBETA;
+      TRPDOSE_BITSVV | TRPDOSE_BITRBE | TRPDOSE_BITDOSEMLET |
+      TRPDOSE_BITALPHA | TRPDOSE_BITBETA;
    int states = four_d ? dc->psCT->nStates : 1;
    TRPCubeInit(&dose_grid, 0); memset(&tc, 0, sizeof(tc)); memset(&p, 0, sizeof(p));
 
@@ -101,6 +107,10 @@ static int TRPClinicalDoseMojoRun(
       if ( rc & CMDERR_MASK ) goto done;
       residual = rc;
    }
+   if ( dc->ulDoseObj & TRPDOSE_BITDOSEMLET ) {
+      dedx = TRPdEdxBasedEdxFind(dc->psdEdxBase, "H2O", 0);
+      if ( dedx == NULL ) { rc=CMDERR_ERROR|ERRTRPDOSE_BADDEDX; goto done; }
+   }
    rc = TRPCubeResize2Wdw(main_cube, "", &dose_grid, wdw, 0.0,
                           TRPCUBE_NODATA, TRPCUBE_CLONENATIVE |
                           TRPCUBERESIZE2WDW_NODATA);
@@ -121,6 +131,7 @@ static int TRPClinicalDoseMojoRun(
          rc = CMDERR_ERROR | ERRTRPDOSE_NOTYET; goto done;
       }
       ct_values += (uint64_t)c->nx*c->ny*c->nz;
+      ct_boundaries += (uint64_t)c->nx+c->ny+c->nz+3;
       int fi=0;
       for ( node=fb->sLH.lh_Head; node->ln_Succ; node=node->ln_Succ,++fi ) {
          struct STRPRST *rst = TRPClinicalDoseMojoRst((struct STRPFLD*)node,s,four_d);
@@ -140,6 +151,7 @@ static int TRPClinicalDoseMojoRun(
    uint64_t voxels=(uint64_t)dose_grid.nx*dose_grid.ny*dose_grid.nz;
    if ( point_count > UINT32_MAX || ddd_entries > UINT32_MAX ||
         bio_entries > UINT32_MAX || ct_values > SIZE_MAX/sizeof(int16_t) ||
+        ct_boundaries > SIZE_MAX/sizeof(double) ||
         (four_d && voxels*(uint64_t)states > SIZE_MAX/sizeof(*b.positions)) ) {
       rc = CMDERR_ERROR | ERRTRPDOSE_SYS; goto done;
    }
@@ -149,6 +161,9 @@ static int TRPClinicalDoseMojoRun(
 } while(0)
    TRP_MOJO_ALLOC(states,states); TRP_MOJO_ALLOC(ct_states,states);
    TRP_MOJO_ALLOC(ct_data,ct_values); TRP_MOJO_ALLOC(grid_fields,fields);
+   TRP_MOJO_ALLOC(ct_boundaries,ct_boundaries);
+   TRP_MOJO_ALLOC(dose_axis_centers,
+                  (uint64_t)dose_grid.nx+dose_grid.ny+dose_grid.nz);
    TRP_MOJO_ALLOC(fields,fields); TRP_MOJO_ALLOC(energies,energies);
    TRP_MOJO_ALLOC(points,point_count); TRP_MOJO_ALLOC(ddd_tables,energies);
    TRP_MOJO_ALLOC(ddd_entries,ddd_entries); TRP_MOJO_ALLOC(bio_tables,bio_tables);
@@ -157,16 +172,41 @@ static int TRPClinicalDoseMojoRun(
    if ( four_d ) TRP_MOJO_ALLOC(positions,voxels*(uint64_t)states);
 #undef TRP_MOJO_ALLOC
 
-   uint64_t cto=0, po=0, ddo=0, beo=0; uint32_t fi=0, eo=0, bto=0;
+   p.dose_x_offset=0;
+   p.dose_y_offset=(uint64_t)dose_grid.nx;
+   p.dose_z_offset=p.dose_y_offset+(uint64_t)dose_grid.ny;
+   p.dose_axis_count=p.dose_z_offset+(uint64_t)dose_grid.nz;
+   for ( int x=0; x<dose_grid.nx; ++x )
+      b.dose_axis_centers[p.dose_x_offset+x]=0.5*(dose_grid.pdx[x]+dose_grid.pdx[x+1]);
+   for ( int y=0; y<dose_grid.ny; ++y )
+      b.dose_axis_centers[p.dose_y_offset+y]=0.5*(dose_grid.pdy[y]+dose_grid.pdy[y+1]);
+   for ( int z=0; z<dose_grid.nz; ++z )
+      b.dose_axis_centers[p.dose_z_offset+z]=0.5*(dose_grid.pdz[z]+dose_grid.pdz[z+1]);
+   uint64_t cto=0, cbo=0, po=0, ddo=0, beo=0; uint32_t fi=0, eo=0, bto=0;
    for ( int s=0; s<states; ++s ) {
       struct STRPCT *ct = four_d ? dc->psCT->psCTState+s : dc->psCT;
       struct STRPCUBE *c=&ct->sCube;
       b.states[s].field_offset=fi; b.states[s].field_count=(uint32_t)base_fields;
       b.ct_states[s].grid=TRPClinicalDoseMojoGrid(c);
       b.ct_states[s].data_offset=cto; b.ct_states[s].pmod=ct->dPmod;
-      b.ct_states[s].pore_size=ct->dPoreSize; b.ct_states[s].byte_swap=c->lByteSwap;
-      for ( int z=0; z<c->nz; ++z ) for ( int y=0; y<c->ny; ++y )
-         for ( int x=0; x<c->nx; ++x ) b.ct_data[cto++]=c->piData[z][y][x];
+      b.ct_states[s].pore_size=ct->dPoreSize; b.ct_states[s].byte_swap=0;
+      b.ct_states[s].x_boundary_offset=cbo;
+      memcpy(b.ct_boundaries+cbo,c->pdx,(size_t)(c->nx+1)*sizeof(*c->pdx)); cbo+=c->nx+1;
+      b.ct_states[s].y_boundary_offset=cbo;
+      memcpy(b.ct_boundaries+cbo,c->pdy,(size_t)(c->ny+1)*sizeof(*c->pdy)); cbo+=c->ny+1;
+      b.ct_states[s].z_boundary_offset=cbo;
+      memcpy(b.ct_boundaries+cbo,c->pdz,(size_t)(c->nz+1)*sizeof(*c->pdz)); cbo+=c->nz+1;
+      b.ct_states[s].grid.dx=c->dvSteps[XX][2];
+      b.ct_states[s].grid.dy=c->dvSteps[YY][2];
+      b.ct_states[s].grid.dz=c->dvSteps[ZZ][2];
+      for ( int z=0; z<c->nz; ++z ) for ( int y=0; y<c->ny; ++y ) {
+         if ( c->lByteSwap )
+            swapw((unsigned short*)c->piData[z][y],
+                  (unsigned short*)(b.ct_data+cto),(unsigned long)c->nx);
+         else
+            memcpy(b.ct_data+cto,c->piData[z][y],(size_t)c->nx*sizeof(*b.ct_data));
+         cto+=(uint64_t)c->nx;
+      }
       int base=0;
       for ( node=fb->sLH.lh_Head; node->ln_Succ; node=node->ln_Succ,++base,++fi ) {
          struct STRPFLD *f=(struct STRPFLD*)node;
@@ -222,6 +262,7 @@ static int TRPClinicalDoseMojoRun(
                   ob->sqrt_beta=rbe->psRSD[z].dbeta0x1;
                   ob->let_mix=spc->psSD[z].dvMomLET[0]*spc->psSD[z].dvMomLET[1];
                   ob->let_bar=0.1*spc->psSD[z].dvMomLETDM[0]*spc->psSD[z].dvMomLETDM[1];
+                  ob->let_dm_sum=spc->psSD[z].dvMomLETDM[0];
                }
             }
          }
@@ -268,9 +309,13 @@ static int TRPClinicalDoseMojoRun(
    p.algorithm=dose_algorithm==TRPFLDDOSE_MULTIPLESCATTERDIVERGENT?
       CLINICAL_DOSE_ALGORITHM_MSDB:CLINICAL_DOSE_ALGORITHM_MS;
    p.biology_model=biological?CLINICAL_DOSE_BIOLOGY_LOW_DOSE:CLINICAL_DOSE_BIOLOGY_NONE;
-   p.max_threads=(uint32_t)dc->nMaxThreads; p.ct_value_count=ct_values;
+   p.max_threads=(uint32_t)dc->nMaxThreads; p.struct_size=sizeof(p);
+   p.ct_value_count=ct_values;
+   p.ct_boundary_count=ct_boundaries;
    p.dose_grid=TRPClinicalDoseMojoGrid(&dose_grid); p.voxel_voi=b.voxel_voi;
    p.ct_states=b.ct_states; p.ct_data=b.ct_data;
+   p.ct_boundaries=b.ct_boundaries;
+   p.dose_axis_centers=b.dose_axis_centers;
    p.hlut_x=dc->psHLUT->pdCT2Path[TRPHLUT_X]; p.hlut_y=dc->psHLUT->pdCT2Path[TRPHLUT_Y];
    p.grid_fields=b.grid_fields; p.fields=b.fields; p.energies=b.energies; p.points=b.points;
    p.ddd_tables=b.ddd_tables; p.ddd_entries=b.ddd_entries;
@@ -294,9 +339,15 @@ static int TRPClinicalDoseMojoRun(
       int local[3]={(int)(i%dose_grid.nx),(int)((i/dose_grid.nx)%dose_grid.ny),(int)(i/(dose_grid.nx*dose_grid.ny))};
       int index[3]={local[0]+offset[0],local[1]+offset[1],local[2]+offset[2]};
       double value[TRPDOSE_MAX];
-      if ( TRPDoseCalcStoreDose(dc,value,biological?b.voxel_voi[i]:-1,
+      int value_error=TRPDoseCalcStoreDose(dc,value,biological?b.voxel_voi[i]:-1,
             b.output[i].absorbed_dose,b.output[i].alpha,b.output[i].sqrt_beta,
-            b.output[i].let_mix,b.output[i].let_bar,1.0,flag) ) {
+            b.output[i].let_mix,b.output[i].let_bar,1.0,flag);
+      if ( !value_error && (dc->ulDoseObj & TRPDOSE_BITDOSEMLET) ) {
+         double dmlet[2]={b.output[i].let_dm_sum,b.output[i].let_bar};
+         value_error=TRPDoseCalcStoreMeanLET(dc,value,b.output[i].let_mix,0.0,
+                                             dmlet,dedx,flag);
+      }
+      if ( value_error ) {
 #pragma omp atomic write
          store_error=1;
       } else for ( int d=0; d<TRPDOSE_MAX; ++d ) if ( dc->ulDoseObj&(1<<d) )

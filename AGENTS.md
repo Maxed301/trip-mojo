@@ -13,6 +13,9 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
   semantics, integration, and performance comparisons. Do not use or search for
   `trip-gpu`, `trip4d`, or another TRiP checkout, even if an older prompt,
   document, patch name, or repository history mentions one.
+- ARC is the sole exception: use `trip_temp`'s `origin/Arc-dev` at `347494d4`
+  for ARC setup and parity until those changes reach `master`. Keep it in a
+  linked worktree; do not replace or modify the canonical master checkout.
 - Keep TRiP's C control plane, geometry, VOI, WET, dose-matrix setup, parsing, and output outside this repository.
 - Accept one flat packed FDCB problem through a thin C ABI and keep the numeric implementation backend-neutral.
 - Keep clinical direct-dose setup and storage in TRiP, with a separate packed
@@ -32,6 +35,9 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
 - Clinical/case inputs on Hydra: `/lustre/bio/mdick/CUDA/TRIP_DATA`. The P101
   4D robust case lives under `TRIP_DATA/P101_4Dopt`; do not read case inputs
   from a TRiP source checkout.
+- The ARC reference exec is `/lustre/bio/lvolz/CAK257/arc.exec`. Its input data
+  stays under `/lustre/bio`; write all generated plans, dose and logs under
+  `/lustre/bio/mdick/CUDA/PROFILES/trip-mojo`.
 - Portable implementation: `~/Projects/trip-mojo` locally and
   `/lustre/bio/mdick/CUDA/trip-mojo` on Hydra.
 
@@ -53,8 +59,17 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
   Modular source build with the added CDNA1/gfx908 target; distinguish compiler
   support from ROCm container/runtime availability in status reports.
 - Keep parsing, file I/O, setup, VOI ownership, and reporting in TRiP's existing CPU control plane.
+- `field / arc(...)` expands to fixed chair-angle fields before matrix packing;
+  it uses the normal FDCB backend and must not gain a duplicate ARC optimizer.
+  Reserve ARC-specific Mojo code for genuinely dynamic per-point geometry such
+  as `arcangles` dose reconstruction.
 - Put GPU effort into dose accumulation, objective/residual evaluation, gradient/backprojection, spot updates, and reductions.
 - Maintain a CPU backend as the correctness/debug reference.
+- Multi-device optimization shards contiguous whole voxels, keeps every robust
+  scenario for a voxel on the same device, and must not duplicate the sparse
+  coefficient matrix. Replicating particles and compact field metadata is
+  acceptable. Direct accelerator matrix storage remains single-device until
+  it has explicit per-device ownership.
 
 ## Validation
 
@@ -73,6 +88,11 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
   log marker to report `states=10`; reloading the saved RST with `file(...)`
   silently exercises static dose and is not 4D evidence.
 - Never use fudge factors, hidden normalization constants, output shaping, or tolerance loosening to make results look better. These hide bugs and usually indicate missing or incorrect physics, geometry, beam modeling, data parsing, or optimization logic. Any empirical/debug-only scale must be explicitly labeled, isolated, and removed before claiming parity.
+- Arc-dev's direct-dose path retains the preceding `sMFDCP.pdG[0]` value when
+  an SPC depth is out of range, which creates deterministic isolated
+  dose-mean-LET outliers. Mojo zeroes all out-of-range spectrum terms. Report
+  this difference explicitly; do not reproduce the stale native state merely
+  to obtain byte parity.
 - Do not trade correctness for speed.
 
 ## Scope control

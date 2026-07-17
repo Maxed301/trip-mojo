@@ -1,0 +1,492 @@
+diff --git a/trpcmdfld.c b/trpcmdfld.c
+index 48542464..d0dac69a 100644
+--- a/trpcmdfld.c
++++ b/trpcmdfld.c
+@@ -122,6 +122,9 @@ static int TRPFldInitParams ( struct STRPFLD *psF,
+                             );
+ 
+ static void DebugOutputMarkInside( struct STRPFLD *psF, char *cStr, uint32_t ulFlag );
++static int TRPFldArcOutlinePoints(struct STRPVOI *psVOI,
++                                  double (**ppdv)[3], size_t *pnPoints,
++                                  uint32_t ulFlag);
+ 
+ /* increment a char integer by one (for arc plans) */
+ char * incr(char *s);
+@@ -132,6 +135,65 @@ int TRPFldTrafoSetTest( struct STRPFLD *psF, uint32_t method );
+ #define TRPCMFLD_MARKINSIDEULTIMATE
+ #endif
+ 
++static int TRPFldArcOutlinePoints(struct STRPVOI *psVOI,
++                                  double (**ppdv)[3], size_t *pnPoints,
++                                  uint32_t ulFlag) {
++   struct STRPCUBE sOutline;
++   unsigned char *pcSeen = NULL;
++   double (*pdvPoints)[3] = NULL;
++   size_t nBoundary = 0, nPoints = 0;
++   int iRC = -1;
++
++   TRPCubeInit(&sOutline,0);
++   if(psVOI == NULL || ppdv == NULL || pnPoints == NULL) goto gDone;
++   if(TRPVOIBinOutline(&psVOI->sCube,&sOutline,psVOI->uiActiveBitMask,ulFlag)
++      & CMDERR_MASK) goto gDone;
++
++   for(int iz=0;iz<sOutline.nz;++iz)
++      for(int iy=0;iy<sOutline.ny;++iy)
++         for(int ix=0;ix<sOutline.nx;++ix)
++            nBoundary += sOutline.plData[iz][iy][ix] != 0;
++
++   const size_t nx = (size_t)sOutline.nx + 1;
++   const size_t ny = (size_t)sOutline.ny + 1;
++   const size_t nz = (size_t)sOutline.nz + 1;
++   pcSeen = calloc(nx*ny*nz,sizeof(*pcSeen));
++   pdvPoints = calloc(2*nBoundary,sizeof(*pdvPoints));
++   if(pcSeen == NULL || pdvPoints == NULL) goto gDone;
++
++   for(int iz=0;iz<sOutline.nz;++iz) {
++      for(int iy=0;iy<sOutline.ny;++iy) {
++         for(int ix=0;ix<sOutline.nx;++ix) {
++            if(!sOutline.plData[iz][iy][ix]) continue;
++            for(int kk=0;kk<2;++kk) {
++               const size_t x = (size_t)ix + kk;
++               const size_t y = (size_t)iy + kk;
++               const size_t z = (size_t)iz + kk;
++               const size_t index = (z*ny + y)*nx + x;
++               if(pcSeen[index]) continue;
++               pcSeen[index] = 1;
++               pdvPoints[nPoints][XX] = sOutline.pdx[x];
++               pdvPoints[nPoints][YY] = sOutline.pdy[y];
++               pdvPoints[nPoints][ZZ] = sOutline.pdz[z];
++               ++nPoints;
++            }
++         }
++      }
++   }
++   *ppdv = pdvPoints;
++   *pnPoints = nPoints;
++   pdvPoints = NULL;
++   iRC = 0;
++   fprintf(stderr,"<I> ARC target outline: %zu boundary voxels, %zu unique corners\n",
++           nBoundary,nPoints);
++
++gDone:;
++   free(pcSeen);
++   free(pdvPoints);
++   TRPCubeFree(&sOutline,0);
++   return iRC;
++}
++
+ /**
+  * @brief Steering function for the interface of Fields in the TRiP shell. 
+  * Each parameter corresponds to one command option to the "field" command.
+@@ -609,6 +671,10 @@ int TRPCmdFld(
+    TRPVOIInit(&sVOIh2o,ulFlagVOI);
+    struct STRPVOI sMarginVOI;
+    TRPVOIInit(&sMarginVOI, ulFlagVOI);
++   double (*pdvArcTargetOutline)[3] = NULL;
++   size_t nArcTargetOutlinePoints = 0;
++   double *pdArcPathTable = NULL;
++   double dArcTargetWdwTime = 0.0;
+ 
+    OMP_STARTTIMER;
+    
+@@ -1531,7 +1597,23 @@ if(*plPassive) { //HACK --- use the unused passive flag to decide the mode of fi
+          sCE.iRC = ERRTRPFLD_IMPORTEXTFACFAILED; goto gError;
+       };
+       
+-      iRC = TRPFldTargetVoiH2OWdw( psF, &sTRP.sPlan.sCT, &sTRP.sHLUT, pcRasterSteps, ulFlagFld);
++      if(*pcArc && pdvArcTargetOutline == NULL) {
++         iRC = TRPFldArcOutlinePoints(psF->psTargetVOI,&pdvArcTargetOutline,
++                                      &nArcTargetOutlinePoints,ulFlagVOI);
++         if(iRC || TRPFldPathTable(&sTRP.sHLUT,&pdArcPathTable)) {
++            sCE.iRC = ERRTRPFLD_BADFIELD; goto gError;
++         }
++      }
++      if(*pcArc) {
++         const double dStart = omp_get_wtime();
++         iRC = TRPFldTargetVoiH2OWdwFromPoints(psF,&sTRP.sPlan.sCT,&sTRP.sHLUT,
++                                               pdvArcTargetOutline,nArcTargetOutlinePoints,
++                                               pdArcPathTable,pcRasterSteps,ulFlagFld);
++         dArcTargetWdwTime += omp_get_wtime() - dStart;
++      } else {
++         iRC = TRPFldTargetVoiH2OWdw(psF,&sTRP.sPlan.sCT,&sTRP.sHLUT,
++                                     pcRasterSteps,ulFlagFld);
++      }
+       if ( iRC & CMDERR_MASK ) {
+          sCE.iRC = ERRTRPFLD_BADFIELD; goto gError;
+       };
+@@ -2290,6 +2372,8 @@ if(!*plPassive) {
+    } 
+ 
+    } while(*pcArc && (((dArcAngle<dArcStopAngle) && (dArcStopAngle>dArcStartAngle)) || ((dArcAngle>dArcStopAngle) && (dArcStopAngle<dArcStartAngle)))); //In case of arc plan, loop over field new structure
++   if(*pcArc)
++      fprintf(stderr,"<TIME> ARC target WET windows: %.6f sec\n",dArcTargetWdwTime);
+    
+    /**********************************************************************************/
+    /* READ MOTION, for correlation to spill file and creation of interplay 4D fields */
+@@ -3438,6 +3522,8 @@ gError:;
+    TRPVOIFree(&sVOIh2o,ulFlagVOI);
+    TRPVOIFree(&sMarginVOI,ulFlagVOI);
+    TRPCTFree(&sCTh2o,ulFlagVOI);
++   free(pdvArcTargetOutline);
++   free(pdArcPathTable);
+ 
+ /*
+    if (pcFileBEVExpanded) free(pcFileBEVExpanded); pcFileBEVExpanded = NULL;
+diff --git a/trpct.c b/trpct.c
+index 9ff968f5..6f449081 100644
+--- a/trpct.c
++++ b/trpct.c
+@@ -2386,12 +2386,13 @@ int TRPCTGridISQS( struct STRPCT *psCT,            /**< inp: CT(s) */
+  * @author Athena Paz (lung modulation) -- moved to SiddonLungmod
+  * @return int (error state)
+  */
+-int TRPCTGridISSiddon(  struct STRPCT *psCT,
++static int TRPCTGridISSiddonImpl( struct STRPCT *psCT,
+                         struct STRPHLUT *psHLUT,
+                         double dvp[3], double dvDir[3],
+                         double *pdzH2Osave,
+                         double *pdzGeo,
+                         int nSteps,
++                        const double *pdPathTable,
+                         uint32_t ulFlag
+ ) {
+    const char *pcDbgMsg = __FILE__"(CTGridISSiddon)"; char *pcMsg = (char *) pcDbgMsg;
+@@ -2630,7 +2631,10 @@ int TRPCTGridISSiddon(  struct STRPCT *psCT,
+             short tmp = psCT->sCube.piData[ sCV.lv[ZZ] ][ sCV.lv[YY] ][ sCV.lv[XX] ];
+             sHTP.iNum = ( ( tmp & 0x00FF ) << 8 ) | ( ( tmp & 0xFF00 ) >> 8 );
+          }
+-         TRPHLUTNum2Path( psHLUT, &sHTP, 1, ulFlagHLUT );
++         if(pdPathTable != NULL)
++            sHTP.dEqvPath = pdPathTable[(uint16_t)sHTP.iNum];
++         else
++            TRPHLUTNum2Path( psHLUT, &sHTP, 1, ulFlagHLUT );
+          /* 2.: Calculate dzDelta and next CT voxel indices */
+          /* Ray intersects X-plane */
+          if (dvLambdaNext[XX] < dvLambdaNext[YY] && dvLambdaNext[XX] < dvLambdaNext[ZZ] ) {
+@@ -2758,6 +2762,29 @@ gError:;
+    return( sCE.iRC | sCE.iSev );
+ }
+ 
++int TRPCTGridISSiddon(  struct STRPCT *psCT,
++                        struct STRPHLUT *psHLUT,
++                        double dvp[3], double dvDir[3],
++                        double *pdzH2Osave,
++                        double *pdzGeo,
++                        int nSteps,
++                        uint32_t ulFlag
++) {
++   return TRPCTGridISSiddonImpl(psCT,psHLUT,dvp,dvDir,pdzH2Osave,pdzGeo,
++                                nSteps,NULL,ulFlag);
++}
++
++int TRPCTGridISSiddonPathTable(struct STRPCT *psCT,
++                               struct STRPHLUT *psHLUT,
++                               double dvp[3], double dvDir[3],
++                               double *pdzH2Osave,
++                               const double *pdPathTable,
++                               uint32_t ulFlag
++) {
++   return TRPCTGridISSiddonImpl(psCT,psHLUT,dvp,dvDir,pdzH2Osave,NULL,0,
++                                pdPathTable,ulFlag);
++}
++
+ 
+ /**
+  * @brief inverted siddon - intended to compute the position of a Bragg Peak in the CT. Give a water depth to get the BEV z CT coordinate
+@@ -2772,13 +2799,14 @@ gError:;
+  * @param ulFlag ...
+  * @return int
+  */
+-int TRPCTGridISSiddonWater(  struct STRPCT *psCT,
++static int TRPCTGridISSiddonWaterImpl(struct STRPCT *psCT,
+                              struct STRPHLUT *psHLUT,
+                              double dvp[3], 
+                              double dvDir[3],
+                              double *pdzH2O, 
+                              double *pdzGeo, 
+                              int nRequestedDepths,
++                             const double *pdPathTable,
+                              uint32_t ulFlag
+ ) {
+    const char *pcDbgMsg = __FILE__"(CTGridISSiddonWater)"; char *pcMsg = (char *) pcDbgMsg;
+@@ -2993,7 +3021,10 @@ int TRPCTGridISSiddonWater(  struct STRPCT *psCT,
+             short tmp = psCT->sCube.piData[ sCV.lv[ZZ] ][ sCV.lv[YY] ][ sCV.lv[XX] ];
+             sHTP.iNum = ( ( tmp & 0x00FF ) << 8 ) | ( ( tmp & 0xFF00 ) >> 8 );
+          }
+-         TRPHLUTNum2Path( psHLUT, &sHTP, 1, ulFlagHLUT );
++         if(pdPathTable != NULL)
++            sHTP.dEqvPath = pdPathTable[(uint16_t)sHTP.iNum];
++         else
++            TRPHLUTNum2Path( psHLUT, &sHTP, 1, ulFlagHLUT );
+          /* 2.: Calculate dzDelta and next CT voxel indices */
+          /* Ray intersects X-plane */
+          if (dvLambdaNext[XX] < dvLambdaNext[YY] && dvLambdaNext[XX] < dvLambdaNext[ZZ] ) {
+@@ -3173,6 +3204,25 @@ gError:;
+    return( sCE.iRC | sCE.iSev );
+ }
+ 
++int TRPCTGridISSiddonWater(struct STRPCT *psCT, struct STRPHLUT *psHLUT,
++                           double dvp[3], double dvDir[3], double *pdzH2O,
++                           double *pdzGeo, int nRequestedDepths,
++                           uint32_t ulFlag) {
++   return TRPCTGridISSiddonWaterImpl(psCT,psHLUT,dvp,dvDir,pdzH2O,pdzGeo,
++                                     nRequestedDepths,NULL,ulFlag);
++}
++
++int TRPCTGridISSiddonWaterPathTable(struct STRPCT *psCT,
++                                    struct STRPHLUT *psHLUT,
++                                    double dvp[3], double dvDir[3],
++                                    double *pdzH2O, double *pdzGeo,
++                                    int nRequestedDepths,
++                                    const double *pdPathTable,
++                                    uint32_t ulFlag) {
++   return TRPCTGridISSiddonWaterImpl(psCT,psHLUT,dvp,dvDir,pdzH2O,pdzGeo,
++                                     nRequestedDepths,pdPathTable,ulFlag);
++}
++
+ /* calculate the WET of the distance from the target point dvp along dvDir to the CT border 
+  * This value is considered in the ScanCap offset, but will be counted twice as it is also part of the CT  */
+ /**
+diff --git a/trpct.h b/trpct.h
+index b6b64962..eed5e7ef 100644
+--- a/trpct.h
++++ b/trpct.h
+@@ -566,6 +566,12 @@ int TRPCTGridISSiddon   ( struct STRPCT *psCT,
+                           double *pdzGeo,
+                           int nSteps,
+                           uint32_t ); 
++int TRPCTGridISSiddonPathTable(struct STRPCT *psCT,
++                               struct STRPHLUT *psHLUT,
++                               double dvp[3], double dvDir[3],
++                               double *pdzH2Osave,
++                               const double *pdPathTable,
++                               uint32_t ulFlag);
+ int TRPCTGridISSiddonLungMod( struct STRPCT *psCT,
+                               struct STRPHLUT *psHLUT,
+                               double dvp[3] , double dvDir[3],  double *pdzH2Osave, struct STRPLUNG *psLungsave,
+@@ -580,6 +586,13 @@ int TRPCTGridISSiddonWater(  struct STRPCT *psCT,
+                              double *pdzGeo, 
+                              int nRequestedDepths,
+                              uint32_t ulFlag );
++int TRPCTGridISSiddonWaterPathTable(struct STRPCT *psCT,
++                                    struct STRPHLUT *psHLUT,
++                                    double dvp[3], double dvDir[3],
++                                    double *pdzH2O, double *pdzGeo,
++                                    int nRequestedDepths,
++                                    const double *pdPathTable,
++                                    uint32_t ulFlag);
+ 
+ /* calculate the WET of the distance from the target point dvp along dvDir to the CT border 
+  * This value is considered in the ScanCap offset, but will be counted twice as it is also part of the CT  */
+diff --git a/trpfld.c b/trpfld.c
+index 0b98357b..a90ce027 100644
+--- a/trpfld.c
++++ b/trpfld.c
+@@ -2253,6 +2253,7 @@ int TRPFldMarkInsideUltimate(
+ 	   double *pdPeakRange    = NULL;
+ 	   double *pdPeakRangeAct = NULL;
+ 	   double *pdPositionInCT = NULL;
++	   double **ppdPathTable = NULL;
+ 	   int *piInsideByIES = NULL;
+ 	   int iB, iPnt;
+ 	   double dvr[4], dvp[4] = {0E0,0E0,0E0,1E0};
+@@ -2292,6 +2293,18 @@ int TRPFldMarkInsideUltimate(
+ 	   if(pdPositionInCT == NULL) goto gError;
+ 	   piInsideByIES = calloc(psRst->nB,sizeof(*(piInsideByIES)));
+ 	   if(piInsideByIES == NULL) goto gError;
++	   ppdPathTable = calloc((size_t)psF->nRobustScenario + 1,sizeof(*ppdPathTable));
++	   if(ppdPathTable == NULL) goto gError;
++	   for(int iRS=-1;iRS<psF->nRobustScenario;++iRS) {
++	      struct STRPHLUT *psTableHLUT = iRS < 0 ? psHLUT : &psF->psRobScen[iRS].sHLUT;
++	      const double dShift = iRS < 0 ? 0.0 : psF->psRobScen[iRS].dHLUTShiftPercent;
++	      for(int jj=-1;jj<iRS;++jj) {
++	         const double dPriorShift = jj < 0 ? 0.0 : psF->psRobScen[jj].dHLUTShiftPercent;
++	         if(dShift == dPriorShift) ppdPathTable[iRS+1] = ppdPathTable[jj+1];
++	      }
++	      if(ppdPathTable[iRS+1] != NULL) continue;
++	      if(TRPFldPathTable(psTableHLUT,&ppdPathTable[iRS+1])) goto gError;
++	   }
+ 	   
+ 	   for(int iB=0; iB < psRst->nB; iB++) {
+ 	      pdPeakRange[iB] = psRst->psRS[iB].sDDD.dP * 1E1 - psRst->psRS[iB].sRSh.dThick - psRst->sScC.dBolus - psRst->sScC.dOffH2O;
+@@ -2326,7 +2339,7 @@ int TRPFldMarkInsideUltimate(
+ 			psRst->psRS[iB].psPnt[iPnt].ulFlag &= ~TRPRSTPNT_EXTENSION;
+ 		    }                                    /* raster -> CT */
+ 		    TRPFldCoordTrafo( psF, dvr, dvp, TRPFLDCOORDTRAFO_GANTRY2PATIENT);
+-		    iRC = TRPCTGridISSiddonWater(psCT,psHLUT,dvp,psF->dvDir,pdPeakRange,pdPositionInCT,psRst->nB,ulFlagCT);           
++		    iRC = TRPCTGridISSiddonWaterPathTable(psCT,psHLUT,dvp,psF->dvDir,pdPeakRange,pdPositionInCT,psRst->nB,ppdPathTable[0],ulFlagCT);
+ 		    if(iRC & CMDERR_MASK) {
+ 		       sCE.iRC = ERRTRPFLD_CTGRIDISFAILED; goto gError;
+ 		    }
+@@ -2356,7 +2369,7 @@ int TRPFldMarkInsideUltimate(
+ 		    for(int iB=0; iB < psRst->nB; iB++) {
+ 		       pdPeakRangeAct[iB] = pdPeakRange[iB] - psF->psRobScen[iRS].dHLUTShiftMMH2O;
+ 		    }
+-		    iRC = TRPCTGridISSiddonWater(psCT,&psF->psRobScen[iRS].sHLUT,dvp,psF->dvDir,pdPeakRangeAct,pdPositionInCT,psRst->nB,ulFlagCT );
++		    iRC = TRPCTGridISSiddonWaterPathTable(psCT,&psF->psRobScen[iRS].sHLUT,dvp,psF->dvDir,pdPeakRangeAct,pdPositionInCT,psRst->nB,ppdPathTable[iRS+1],ulFlagCT);
+ 		    if(iRC & CMDERR_MASK) {
+ 		       sCE.iRC = ERRTRPFLD_CTGRIDISFAILED; goto gError;
+ 		    }
+@@ -2526,9 +2539,18 @@ gError:;
+       }
+    }
+    free(pdPositionInCT);
+-   free(pdPeakRange);
+-   free(pdPeakRangeAct);
+-   TRPCubeFree(&sCube,0);
++	   free(pdPeakRange);
++	   free(pdPeakRangeAct);
++	   if(ppdPathTable != NULL) {
++	      for(int ii=0;ii<=psF->nRobustScenario;++ii) {
++	         int iFirst = 1;
++	         for(int jj=0;jj<ii;++jj)
++	            if(ppdPathTable[ii] == ppdPathTable[jj]) iFirst = 0;
++	         if(iFirst) free(ppdPathTable[ii]);
++	      }
++	      free(ppdPathTable);
++	   }
++	   TRPCubeFree(&sCube,0);
+    TRPCubeFree(&sCubeDT,0);
+ 
+ if ( ulFlag & TRPFLD_DEBUG ) fprintf( stderr, "<D> %s done\n", pcDbgMsg );
+@@ -19394,9 +19416,39 @@ if ( ulFlag & TRPFLD_DEBUG ) fprintf( stderr, "<D> %s done\n", pcDbgMsg );
+  * @param ulFlag p_ulFlag:function action flag
+  * @return int error code
+  */
+-int TRPFldTargetVoiH2OWdw(struct STRPFLD *psF,           /**< upd: field     */
++int TRPFldPathTable(struct STRPHLUT *psHLUT, double **ppdTable) {
++   double *pdTable = malloc((UINT16_MAX + 1u) * sizeof(*pdTable));
++   double *pdInput = malloc((UINT16_MAX + 1u) * sizeof(*pdInput));
++   double *pdTab[2];
++
++   if(psHLUT == NULL || ppdTable == NULL || pdTable == NULL || pdInput == NULL) {
++      free(pdTable);
++      free(pdInput);
++      return -1;
++   }
++   pdTab[0] = psHLUT->pdCT2Path[TRPHLUT_X];
++   pdTab[1] = psHLUT->pdCT2Path[TRPHLUT_Y];
++   for(uint32_t ii=0;ii<=UINT16_MAX;++ii)
++      pdInput[ii] = max((double)(int16_t)ii,pdTab[0][0]);
++   const int iRC = vintpol1d(pdInput,1,UINT16_MAX + 1u,pdTab,psHLUT->nn,2,pdTable,1);
++   free(pdInput);
++   if(iRC) {
++      free(pdTable);
++      return iRC;
++   }
++   for(uint32_t ii=0;ii<=UINT16_MAX;++ii)
++      pdTable[ii] = max(0E0,pdTable[ii]);
++   *ppdTable = pdTable;
++   return 0;
++}
++
++int TRPFldTargetVoiH2OWdwFromPoints(
++                          struct STRPFLD *psF,           /**< upd: field */
+                           struct STRPCT *psCT,           /**< inp: CT */
+                           struct STRPHLUT *psHLUT,       /**< inp: hlut */
++                          const double (*pdvPoints)[3],   /**< inp: optional target corners */
++                          size_t nPoints,
++                          const double *pdPathTable,
+                           const char *pcRasterSteps,     /**< inp: raster step size */
+                           uint32_t ulFlag                /**< inp: function action flag */
+                          ) {
+@@ -19451,31 +19503,45 @@ int TRPFldTargetVoiH2OWdw(struct STRPFLD *psF,           /**< upd: field     */
+       }
+    }
+ 
+-   /* calculate the border voxels of the VOI*/
+-   iRC = TRPVOIBinOutline(&(psF->psTargetVOI->sCube),&sOutline,psF->psTargetVOI->uiActiveBitMask,ulFlagVOI);
+-   if(iRC & CMDERR_MASK) {
+-      sCE.iRC = ERRTRPFLD_BADFIELD; goto gError;
++   if(pdvPoints == NULL) {
++      iRC = TRPVOIBinOutline(&(psF->psTargetVOI->sCube),&sOutline,
++                             psF->psTargetVOI->uiActiveBitMask,ulFlagVOI);
++      if(iRC & CMDERR_MASK) {
++         sCE.iRC = ERRTRPFLD_BADFIELD; goto gError;
++      }
+    }
+    double dvp[2][4]; dvp[0][3] = dvp[1][3] = 0;
+    double dzH2O;
+    double dvRange[2] = {DBL_MAX,-DBL_MAX};
+-   for(int iz=0;iz<sOutline.nz;++iz) {
+-      dvp[0][ZZ] = sOutline.pdz[iz];
+-      dvp[1][ZZ] = sOutline.pdz[iz+1];
+-      for(int iy=0;iy<sOutline.ny;++iy) {
+-         dvp[0][YY] = sOutline.pdy[iy];
+-         dvp[1][YY] = sOutline.pdy[iy+1];
+-         for(int ix=0;ix<sOutline.nx;++ix) {
+-            dvp[0][XX] = sOutline.pdx[ix];
+-            dvp[1][XX] = sOutline.pdx[ix+1];
+-            if(sOutline.plData[iz][iy][ix]) {
+-               for(int kk=0;kk<2;++kk) {
+-                  iRC = TRPCTGridISSiddon(psCT,psHLUT,dvp[kk],psF->dvDir,&dzH2O,NULL,0,ulFlagCT);
+-                  if(iRC & CMDERR_MASK) {
+-                     sCE.iRC = ERRTRPFLD_CTGRIDISFAILED; goto gError;
++   if(pdvPoints != NULL) {
++      for(size_t ii=0;ii<nPoints;++ii) {
++         iRC = TRPCTGridISSiddonPathTable(psCT,psHLUT,(double *)pdvPoints[ii],
++                                          psF->dvDir,&dzH2O,pdPathTable,ulFlagCT);
++         if(iRC & CMDERR_MASK) {
++            sCE.iRC = ERRTRPFLD_CTGRIDISFAILED; goto gError;
++         }
++         if(dzH2O < dvRange[0]) dvRange[0] = dzH2O;
++         if(dzH2O > dvRange[1]) dvRange[1] = dzH2O;
++      }
++   } else {
++      for(int iz=0;iz<sOutline.nz;++iz) {
++         dvp[0][ZZ] = sOutline.pdz[iz];
++         dvp[1][ZZ] = sOutline.pdz[iz+1];
++         for(int iy=0;iy<sOutline.ny;++iy) {
++            dvp[0][YY] = sOutline.pdy[iy];
++            dvp[1][YY] = sOutline.pdy[iy+1];
++            for(int ix=0;ix<sOutline.nx;++ix) {
++               dvp[0][XX] = sOutline.pdx[ix];
++               dvp[1][XX] = sOutline.pdx[ix+1];
++               if(sOutline.plData[iz][iy][ix]) {
++                  for(int kk=0;kk<2;++kk) {
++                     iRC = TRPCTGridISSiddon(psCT,psHLUT,dvp[kk],psF->dvDir,&dzH2O,NULL,0,ulFlagCT);
++                     if(iRC & CMDERR_MASK) {
++                        sCE.iRC = ERRTRPFLD_CTGRIDISFAILED; goto gError;
++                     }
++                     if(dzH2O < dvRange[0]) dvRange[0] = dzH2O;
++                     if(dzH2O > dvRange[1]) dvRange[1] = dzH2O;
+                   }
+-                  if(dzH2O < dvRange[0]) dvRange[0] = dzH2O;
+-                  if(dzH2O > dvRange[1]) dvRange[1] = dzH2O;
+                }
+             }
+          }
+@@ -19571,6 +19637,15 @@ if ( ulFlag & TRPFLD_DEBUG ) fprintf( stderr, "<D> %s done\n", pcDbgMsg );
+    return( sCE.iRC | sCE.iSev );
+ }
+ 
++int TRPFldTargetVoiH2OWdw(struct STRPFLD *psF,
++                          struct STRPCT *psCT,
++                          struct STRPHLUT *psHLUT,
++                          const char *pcRasterSteps,
++                          uint32_t ulFlag) {
++   return TRPFldTargetVoiH2OWdwFromPoints(psF,psCT,psHLUT,NULL,0,NULL,
++                                          pcRasterSteps,ulFlag);
++}
++
+ 
+ /**
+  * @brief calculate a representation of the given CT along the beam's eye view for this field. Restricted to the RST BEV Wdw
+diff --git a/trpfld.h b/trpfld.h
+index 9a27c69f..f31f68f6 100644
+--- a/trpfld.h
++++ b/trpfld.h
+@@ -421,6 +421,12 @@ int TRPFldAddRangeMargins ( struct STRPFLD *, struct STRPVOI *, struct STRPVOI *
+                             struct STRPHLUT *, double, double, uint32_t );
+ 
+ int TRPFldTargetVoiH2OWdw(struct STRPFLD *psF, struct STRPCT *psCT, struct STRPHLUT *psHLUT, const char *pcRasterSteps, uint32_t ulFlag );
++int TRPFldPathTable(struct STRPHLUT *psHLUT, double **ppdTable);
++int TRPFldTargetVoiH2OWdwFromPoints(struct STRPFLD *psF, struct STRPCT *psCT,
++                                    struct STRPHLUT *psHLUT,
++                                    const double (*pdvPoints)[3], size_t nPoints,
++                                    const double *pdPathTable,
++                                    const char *pcRasterSteps, uint32_t ulFlag );
+ 
+ int TRPFldConvertCube2BEV(struct STRPFLD *psF, struct STRPCUBE *psCube, struct STRPCUBE *psCubeOut, struct STRPCUBE *psCubeVOIOut, 
+                           struct STRPVOIBASE *psVB, const char *pcFilename, double dResolution, double dMargin, uint32_t ulFlag );
+

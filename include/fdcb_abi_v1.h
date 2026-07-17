@@ -13,6 +13,7 @@ enum {
     FDCB_FLAG_BIOLOGICAL = 1u << 1,
     FDCB_FLAG_INITIALIZE = 1u << 2,
     FDCB_FLAG_DEVICE_BOOTSTRAP = 1u << 3,
+    FDCB_FLAG_TRACE = 1u << 4,
     FDCB_PRECISION_REFERENCE = 1,
     FDCB_PRECISION_MIXED32 = 2,
     FDCB_MIN_PARTICLE_DISABLED = 0,
@@ -220,6 +221,15 @@ int32_t trip_fdcb_storage_optimize_accelerator_v1(
     FDCBProblemStorageV1 *storage,
     double *particles_out,
     uint64_t particles_out_count,
+    FDCBResultV1 *result_out
+);
+
+/* V1 accepts two or three devices and shards packed voxels. */
+int32_t trip_fdcb_storage_optimize_accelerators_v1(
+    FDCBProblemStorageV1 *storage,
+    double *particles_out,
+    uint64_t particles_out_count,
+    uint32_t device_count,
     FDCBResultV1 *result_out
 );
 
