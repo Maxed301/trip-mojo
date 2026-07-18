@@ -148,7 +148,7 @@ struct CpuEvaluator(ObjectiveEvaluator):
     def initial_direction(
         mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
-        return initial_direction(problem, gradient)
+        return host_initial_direction(problem, gradient)
 
     def exact_step(
         mut self,
@@ -208,7 +208,7 @@ struct DeviceEvaluator(Movable, ObjectiveEvaluator):
     ) raises -> List[Float64]:
         if self.device_bootstrap:
             return self.workspace.zero_gradient_direction()
-        return initial_direction(problem, gradient)
+        return host_initial_direction(problem, gradient)
 
     def exact_step(
         mut self,
@@ -636,7 +636,7 @@ def run_optimization[
     )
 
 
-def initial_direction(
+def host_initial_direction(
     problem: OptimizationProblem, gradient: List[Float64]
 ) raises -> List[Float64]:
     for value in problem.initial_direction:

@@ -5,7 +5,7 @@ from optimizer import (
     STOP_MAX_ITERATIONS,
     evaluate_objective,
     fletcher_reeves_direction,
-    initial_direction,
+    host_initial_direction,
     optimize_on_cpu,
 )
 from optimization_problem import (
@@ -89,7 +89,7 @@ def test_initialization_prefers_packed_host_direction() raises:
     var problem = build_problem()
     problem.initial_direction[0] = 7.0
     problem.initial_direction[1] = 11.0
-    var direction = initial_direction(problem, [3.0, 5.0])
+    var direction = host_initial_direction(problem, [3.0, 5.0])
     assert_equal(direction[0], 7.0)
     assert_equal(direction[1], 11.0)
 

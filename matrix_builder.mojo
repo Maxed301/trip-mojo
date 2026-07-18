@@ -9,6 +9,8 @@ from std.memory import OpaquePointer, UnsafePointer, alloc, stack_allocation
 from std.sys.info import size_of
 from std.time import perf_counter_ns
 
+from device_copy import copy_bytes_to_device
+
 
 comptime MATRIX_BLOCK_SIZE = 128
 comptime MATRIX_FILL_BLOCK_SIZE = 128
@@ -144,24 +146,6 @@ struct _DDDValue(Copyable, Movable):
     var fwhm1: Float64
     var mixture: Float64
     var fwhm2: Float64
-
-
-def _copy_bytes_to_device[
-    origin: Origin, //
-](
-    context: DeviceContext,
-    source: UnsafePointer[UInt8, origin],
-    byte_count: Int,
-) raises -> DeviceBuffer[DType.uint8]:
-    var allocation_count = byte_count
-    if allocation_count == 0:
-        allocation_count = 1
-    var host = context.enqueue_create_host_buffer[DType.uint8](allocation_count)
-    for index in range(byte_count):
-        host[index] = source[index]
-    var device = context.enqueue_create_buffer[DType.uint8](allocation_count)
-    context.enqueue_copy(device, host)
-    return device^
 
 
 @always_inline("nodebug")
@@ -593,37 +577,37 @@ def build_device_matrix(
     var entry_count = Int(view.ddd_entry_count)
     var device_id = Int(view.device_id)
     var context = DeviceContext(device_id=device_id)
-    var energy_device_bytes = _copy_bytes_to_device(
+    var energy_device_bytes = copy_bytes_to_device(
         context,
         view.energy_slices.bitcast[UInt8](),
         energy_count * size_of[MatrixEnergySlice](),
     )
-    var point_device_bytes = _copy_bytes_to_device(
+    var point_device_bytes = copy_bytes_to_device(
         context,
         view.points.bitcast[UInt8](),
         point_count * size_of[MatrixPoint](),
     )
-    var group_device_bytes = _copy_bytes_to_device(
+    var group_device_bytes = copy_bytes_to_device(
         context,
         view.groups.bitcast[UInt8](),
         group_count * size_of[MatrixGroup](),
     )
-    var raw_energy_device_bytes = _copy_bytes_to_device(
+    var raw_energy_device_bytes = copy_bytes_to_device(
         context,
         view.raw_energies.bitcast[UInt8](),
         energy_count * size_of[RawMatrixEnergy](),
     )
-    var raw_group_device_bytes = _copy_bytes_to_device(
+    var raw_group_device_bytes = copy_bytes_to_device(
         context,
         view.raw_groups.bitcast[UInt8](),
         group_count * size_of[RawMatrixGroup](),
     )
-    var table_device_bytes = _copy_bytes_to_device(
+    var table_device_bytes = copy_bytes_to_device(
         context,
         view.ddd_tables.bitcast[UInt8](),
         table_count * size_of[MatrixDepthDoseTable](),
     )
-    var entry_device_bytes = _copy_bytes_to_device(
+    var entry_device_bytes = copy_bytes_to_device(
         context,
         view.ddd_entries.bitcast[UInt8](),
         entry_count * size_of[MatrixDepthDoseEntry](),

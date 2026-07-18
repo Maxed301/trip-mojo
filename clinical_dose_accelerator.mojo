@@ -6,6 +6,8 @@ from std.math import ceildiv, exp
 from std.memory import OpaquePointer, UnsafePointer
 from std.sys.info import size_of
 
+from device_copy import copy_bytes_to_device
+
 from clinical_dose import (
     BioInterpolation,
     ClinicalDoseBioEntry,
@@ -37,24 +39,6 @@ from clinical_dose import (
 
 
 comptime CLINICAL_DOSE_ACCELERATOR_BLOCK_SIZE = 128
-
-
-def _copy_bytes_to_device[
-    origin: Origin, //
-](
-    context: DeviceContext,
-    source: UnsafePointer[UInt8, origin],
-    byte_count: Int,
-) raises -> DeviceBuffer[DType.uint8]:
-    var allocation_count = byte_count
-    if allocation_count == 0:
-        allocation_count = 1
-    var host = context.enqueue_create_host_buffer[DType.uint8](allocation_count)
-    for index in range(byte_count):
-        host[index] = source[index]
-    var device = context.enqueue_create_buffer[DType.uint8](allocation_count)
-    context.enqueue_copy(device, host)
-    return device^
 
 
 def _copy_float64_list_to_device(
@@ -410,7 +394,7 @@ def compute_clinical_dose_accelerator(
     var floating_device = _copy_float64_list_to_device(
         context, floating_metadata
     )
-    var voi_device = _copy_bytes_to_device(
+    var voi_device = copy_bytes_to_device(
         context,
         view.voxel_voi.bitcast[UInt8](),
         (
@@ -418,12 +402,12 @@ def compute_clinical_dose_accelerator(
             == CLINICAL_DOSE_BIOLOGY_LOW_DOSE else 0
         ),
     )
-    var ct_state_device = _copy_bytes_to_device(
+    var ct_state_device = copy_bytes_to_device(
         context,
         view.ct_states.bitcast[UInt8](),
         Int(view.state_count) * size_of[ClinicalDoseCTState](),
     )
-    var state_device = _copy_bytes_to_device(
+    var state_device = copy_bytes_to_device(
         context,
         view.states.bitcast[UInt8](),
         (
@@ -432,77 +416,77 @@ def compute_clinical_dose_accelerator(
             > UInt32(1) else 0
         ),
     )
-    var transformed_device = _copy_bytes_to_device(
+    var transformed_device = copy_bytes_to_device(
         context,
         view.transformed_voxels.bitcast[UInt8](),
         Int(view.transformed_voxel_count) * size_of[ClinicalDosePosition](),
     )
-    var ct_device = _copy_bytes_to_device(
+    var ct_device = copy_bytes_to_device(
         context,
         view.ct_data.bitcast[UInt8](),
         Int(view.ct_value_count) * size_of[Int16](),
     )
-    var dose_axis_device = _copy_bytes_to_device(
+    var dose_axis_device = copy_bytes_to_device(
         context,
         view.dose_axis_centers.bitcast[UInt8](),
         Int(view.dose_axis_count) * size_of[Float64](),
     )
-    var ct_boundary_device = _copy_bytes_to_device(
+    var ct_boundary_device = copy_bytes_to_device(
         context,
         view.ct_boundaries.bitcast[UInt8](),
         Int(view.ct_boundary_count) * size_of[Float64](),
     )
-    var dense_device = _copy_bytes_to_device(
+    var dense_device = copy_bytes_to_device(
         context,
         Span(dense_hlut).unsafe_ptr().bitcast[UInt8](),
         len(dense_hlut) * size_of[Float64](),
     )
-    var grid_field_device = _copy_bytes_to_device(
+    var grid_field_device = copy_bytes_to_device(
         context,
         view.grid_fields.bitcast[UInt8](),
         Int(view.field_count) * size_of[ClinicalDoseGridField](),
     )
-    var field_device = _copy_bytes_to_device(
+    var field_device = copy_bytes_to_device(
         context,
         view.fields.bitcast[UInt8](),
         Int(view.field_count) * size_of[ClinicalDoseField](),
     )
-    var energy_device = _copy_bytes_to_device(
+    var energy_device = copy_bytes_to_device(
         context,
         view.energies.bitcast[UInt8](),
         Int(view.energy_count) * size_of[ClinicalDoseEnergy](),
     )
-    var point_device = _copy_bytes_to_device(
+    var point_device = copy_bytes_to_device(
         context,
         view.points.bitcast[UInt8](),
         Int(view.point_count) * size_of[ClinicalDosePoint](),
     )
-    var ddd_table_device = _copy_bytes_to_device(
+    var ddd_table_device = copy_bytes_to_device(
         context,
         view.ddd_tables.bitcast[UInt8](),
         Int(view.ddd_table_count) * size_of[ClinicalDoseDDDTable](),
     )
-    var ddd_entry_device = _copy_bytes_to_device(
+    var ddd_entry_device = copy_bytes_to_device(
         context,
         view.ddd_entries.bitcast[UInt8](),
         Int(view.ddd_entry_count) * size_of[ClinicalDoseDDDEntry](),
     )
-    var bio_table_device = _copy_bytes_to_device(
+    var bio_table_device = copy_bytes_to_device(
         context,
         view.bio_tables.bitcast[UInt8](),
         Int(view.bio_table_count) * size_of[ClinicalDoseBioTable](),
     )
-    var bio_entry_device = _copy_bytes_to_device(
+    var bio_entry_device = copy_bytes_to_device(
         context,
         view.bio_entries.bitcast[UInt8](),
         Int(view.bio_entry_count) * size_of[ClinicalDoseBioEntry](),
     )
-    var run_offset_device = _copy_bytes_to_device(
+    var run_offset_device = copy_bytes_to_device(
         context,
         Span(energy_run_offsets).unsafe_ptr().bitcast[UInt8](),
         len(energy_run_offsets) * size_of[UInt32](),
     )
-    var run_device = _copy_bytes_to_device(
+    var run_device = copy_bytes_to_device(
         context,
         Span(point_runs).unsafe_ptr().bitcast[UInt8](),
         len(point_runs) * size_of[ClinicalDosePointRun](),

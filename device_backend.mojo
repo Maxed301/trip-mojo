@@ -1332,23 +1332,6 @@ struct DeviceWorkspace(Movable):
         device_id: Int,
         voxel_offset: Int,
         voxel_count: Int,
-    ) raises:
-        self = DeviceWorkspace(
-            problem,
-            problem.particles.unsafe_ptr().bitcast[NoneType](),
-            0,
-            device_id,
-            voxel_offset,
-            voxel_count,
-            True,
-        )
-
-    def __init__(
-        out self,
-        problem: OptimizationProblem,
-        device_id: Int,
-        voxel_offset: Int,
-        voxel_count: Int,
         validate_problem: Bool,
         defer_upload_sync: Bool = False,
     ) raises:
