@@ -135,6 +135,7 @@ struct FDCBVoxelScenarioV1(Copyable, Movable):
 @fieldwise_init
 struct FDCBSliceV1(Copyable, Movable):
     var field_slice_index: UInt32
+    var matrix_slice_index: UInt32
     var coefficient_offset: UInt64
     var coefficient_count: UInt32
     var dose_coefficient: Float64

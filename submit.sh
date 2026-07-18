@@ -45,7 +45,7 @@ apptainer=$(command -v apptainer)
 vendor_config
 mkdir -p "$profiles"
 job=$(sbatch --parsable --export=NONE --job-name="trip-mojo-$vendor" \
-  --nodes=1 --cpus-per-task=32 --mem=160G --time=00:10:00 \
+  --nodes=1 --cpus-per-task=32 --mem=256G --time=00:10:00 \
   --partition="$partition" --constraint="$constraint" --gres="$gres" \
   --output="$profiles/%j.out" \
   "$script" --run-job "$vendor" "$gpus" "$plan" "$apptainer" "$repo")

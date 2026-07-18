@@ -23,25 +23,26 @@ _Static_assert(sizeof(FDCBMatrixDDDEntryV1) == 40, "matrix DDD entry ABI");
 _Static_assert(sizeof(FDCBMatrixProblemViewV1) == 104, "matrix view ABI");
 _Static_assert(sizeof(FDCBMatrixResultV1) == 72, "matrix result ABI");
 
-static void test_matrix_accelerator(void) {
-    FDCBMatrixEnergySliceV1 energy = {0, 260, 0};
+static double matrix_reference_output[260];
+static FDCBResultV1 matrix_reference_result;
+
+static void test_matrix_accelerator(int procedural) {
+    FDCBMatrixEnergySliceV1 energies[2] = {
+        {0, 260, 0}, {0, 260, 0},
+    };
     FDCBMatrixPointV1 points[260];
     FDCBMatrixGroupV1 group = {
         .slice_offset = 0,
-        .slice_count = 1,
+        .slice_count = 2,
         .bev_x = 0.0,
         .bev_y = 0.0,
         .relative_cutoff = 0.1,
     };
-    FDCBMatrixRawEnergyV1 raw_energy = {
-        .energy_slice = 0,
-        .ddd_table = 0,
-        .depth_shift_mm = 0.0,
-        .focus_squared = 0.0,
-        .lateral_limit_scale = 100.0,
-        .fallback_scale = 100.0,
+    FDCBMatrixRawEnergyV1 raw_energies[2] = {
+        {0, 0, 0.0, 0.0, 100.0, 100.0},
+        {0, 0, 0.0, 4.0, 100.0, 100.0},
     };
-    FDCBMatrixRawGroupV1 raw_group = {0, 1, 5.0, 0.0, 0.0};
+    FDCBMatrixRawGroupV1 raw_group = {0, 2, 5.0, 0.0, 0.0};
     FDCBMatrixDDDTableV1 table = {0, 2};
     FDCBMatrixDDDEntryV1 entries[2] = {
         {0.0, 1.0, 1.0, 0.0, 0.0},
@@ -50,20 +51,23 @@ static void test_matrix_accelerator(void) {
     FDCBMatrixProblemViewV1 problem = {
         .version = FDCB_MATRIX_ABI_VERSION_V1,
         .group_count = 1,
-        .energy_slice_count = 1,
-        .maximum_group_slices = 1,
-        .slice_count = 1,
+        .energy_slice_count = 2,
+        .maximum_group_slices = 2,
+        .slice_count = 2,
         .point_count = 260,
         .ddd_table_count = 1,
         .ddd_entry_count = 2,
-        .energy_slices = &energy,
+        .energy_slices = energies,
         .points = points,
         .groups = &group,
-        .raw_energies = &raw_energy,
+        .raw_energies = raw_energies,
         .raw_groups = &raw_group,
         .ddd_tables = &table,
         .ddd_entries = entries,
     };
+    if (procedural)
+        problem.flags = FDCB_MATRIX_FLAG_DEVICE_ONLY |
+                        FDCB_MATRIX_FLAG_FORCE_PROCEDURAL;
     FDCBMatrixStorageV1 *storage = NULL;
     FDCBMatrixResultV1 result;
     uint32_t expected_count = 0;
@@ -82,22 +86,25 @@ static void test_matrix_accelerator(void) {
 #endif
     if (status != 0) return;
     assert(storage != NULL);
-    assert(result.entry_count == expected_count);
-    assert(result.slice_count == 1);
+    assert(result.entry_count == 2 * expected_count);
+    assert(result.slice_count == 2);
     assert(result.group_count == 1);
-    assert(result.group_entry_counts[0] == expected_count);
+    assert(!!(result.flags & FDCB_MATRIX_RESULT_PROCEDURAL) == !!procedural);
+    assert(result.group_entry_counts[0] == 2 * expected_count);
     assert(result.slice_entry_counts[0] == expected_count);
+    assert(result.slice_entry_counts[1] == expected_count);
     assert(result.slice_dose[0] == 2.0);
-    {
-        const double expected = 2.7728 /
-                                3.141592653589793238462643383279502884;
-        uint32_t output = 0;
-        for (uint32_t point = 0; point < 260; ++point) {
-            if (point % 7 == 0) continue;
-            assert(result.point_indices[output] == point);
-            assert(fabs(result.coefficients[output] - expected) <=
-                   fabs(expected) * 4.0 * DBL_EPSILON);
-            ++output;
+    assert(result.slice_dose[1] == 2.0);
+    if (!procedural) {
+        for (uint32_t matrix_slice = 0; matrix_slice < 2; ++matrix_slice) {
+            uint32_t output = matrix_slice * expected_count;
+            for (uint32_t point = 0; point < 260; ++point) {
+                if (point % 7 == 0) continue;
+                assert(result.point_indices[output] == point);
+                assert(isfinite(result.coefficients[output]));
+                assert(result.coefficients[output] > 0.0);
+                ++output;
+            }
         }
     }
     {
@@ -113,13 +120,23 @@ static void test_matrix_accelerator(void) {
             .overdose_tolerance = 0.05,
             .scenario_offset = 0,
         };
-        FDCBVoxelScenarioV1 scenario = {0, 1, 0};
+        FDCBVoxelScenarioV1 scenario = {0, 2, 0};
         FDCBScenarioStateV1 state = {0};
-        FDCBSliceV1 slice = {
-            .field_slice_index = 0,
-            .coefficient_offset = 0,
-            .coefficient_count = expected_count,
-            .dose_coefficient = 1.0 / mev_to_gy,
+        FDCBSliceV1 slices[2] = {
+            {
+                .field_slice_index = 0,
+                .matrix_slice_index = 1,
+                .coefficient_offset = expected_count,
+                .coefficient_count = expected_count,
+                .dose_coefficient = 1.0 / mev_to_gy,
+            },
+            {
+                .field_slice_index = 0,
+                .matrix_slice_index = 0,
+                .coefficient_offset = 0,
+                .coefficient_count = expected_count,
+                .dose_coefficient = 1.0 / mev_to_gy,
+            },
         };
         FDCBProblemViewV1 optimizer = {0};
         for (uint32_t point = 0; point < 260; ++point) {
@@ -145,7 +162,7 @@ static void test_matrix_accelerator(void) {
         optimizer.point_count = 260;
         optimizer.voxel_count = 1;
         optimizer.voxel_scenario_count = 1;
-        optimizer.slice_count = 1;
+        optimizer.slice_count = 2;
         optimizer.coefficient_count = result.entry_count;
 
         FDCBProblemStorageV1 *problem_storage = NULL;
@@ -161,7 +178,7 @@ static void test_matrix_accelerator(void) {
         memcpy(arrays.voxels, &voxel, sizeof(voxel));
         memcpy(arrays.voxel_scenarios, &scenario, sizeof(scenario));
         memcpy(arrays.scenario_states, &state, sizeof(state));
-        memcpy(arrays.slices, &slice, sizeof(slice));
+        memcpy(arrays.slices, slices, sizeof(slices));
 
         double output[260];
         FDCBResultV1 optimizer_result;
@@ -172,13 +189,26 @@ static void test_matrix_accelerator(void) {
         for (uint32_t point = 0; point < 260; ++point) {
             assert(isfinite(output[point]));
         }
+        if (!procedural) {
+            memcpy(matrix_reference_output, output, sizeof(output));
+            matrix_reference_result = optimizer_result;
+        } else {
+            assert(memcmp(matrix_reference_output, output, sizeof(output)) == 0);
+            assert(matrix_reference_result.iterations == optimizer_result.iterations);
+            assert(matrix_reference_result.chi2 == optimizer_result.chi2);
+            assert(matrix_reference_result.residual_percent ==
+                   optimizer_result.residual_percent);
+            assert(matrix_reference_result.stop_reason ==
+                   optimizer_result.stop_reason);
+        }
         assert(trip_fdcb_matrix_problem_storage_destroy_v1(problem_storage) ==
                0);
     }
 }
 
 int main(void) {
-    test_matrix_accelerator();
+    test_matrix_accelerator(0);
+    test_matrix_accelerator(1);
     const double mev_to_gy = 1.602189e-8;
     FDCBFieldSliceV1 field_slice = {0, 0, 0, 2, 0, 0.0};
     double particles[2] = {100.0, 50.0};

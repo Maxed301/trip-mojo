@@ -70,7 +70,7 @@ typedef struct {
 
 typedef struct {
     uint32_t field_slice_index;
-    uint32_t reserved;
+    uint32_t matrix_slice_index; /* Used only by procedural external matrices. */
     uint64_t coefficient_offset;
     uint32_t coefficient_count;
     double dose_coefficient;

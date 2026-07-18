@@ -19,7 +19,13 @@ from fdcb_problem import (
     FDCB_PRECISION_REFERENCE,
     FDCB_PRECISION_MIXED32,
 )
-from fdcb_matrix_accelerator import FDCBMatrixStorageV1
+from fdcb_matrix_accelerator import (
+    FDCBMatrixEnergySliceV1,
+    FDCBMatrixGroupV1,
+    FDCBMatrixPointV1,
+    FDCBMatrixStorageV1,
+    _contribution,
+)
 
 comptime FDCB_ACCELERATOR_BLOCK_SIZE = 128
 comptime FDCB_REDUCTION_BLOCK_SIZE = 256
@@ -259,6 +265,43 @@ def _coefficient_point[
     return Int(rebind[Scalar[DType.uint16]](coefficient_points[coefficient]))
 
 
+@always_inline("nodebug")
+def _matrix_coefficient[
+    CoefficientLayout: TensorLayout
+](
+    procedural: UInt32,
+    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
+    points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
+    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_values: UnsafePointer[Float64, MutAnyOrigin],
+    coefficients: TileTensor[
+        FDCB_ACCELERATOR_DTYPE, CoefficientLayout, MutAnyOrigin
+    ],
+    slice: Int,
+    local_point: Int,
+    coefficient: Int,
+) -> Scalar[FDCB_ACCELERATOR_DTYPE]:
+    comptime assert coefficients.flat_rank == 1
+    if procedural != UInt32(0):
+        var group = groups[Int(slice_groups[slice])].copy()
+        return Scalar[FDCB_ACCELERATOR_DTYPE](
+            _contribution(
+                energy_slices,
+                points,
+                group,
+                slice_energy,
+                slice_values,
+                slice,
+                local_point,
+            )
+        )
+    return Scalar[FDCB_ACCELERATOR_DTYPE](
+        rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](coefficients[coefficient])
+    )
+
+
 def sparse_slice_dot_kernel[
     FieldLayout: TensorLayout,
     SliceLayout: TensorLayout,
@@ -269,6 +312,14 @@ def sparse_slice_dot_kernel[
     field_point_offsets: TileTensor[DType.uint64, FieldLayout, MutAnyOrigin],
     slice_metadata: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
     slice_offsets: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
+    matrix_slice_indices: TileTensor[DType.uint32, SliceLayout, MutAnyOrigin],
+    procedural: UInt32,
+    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
+    matrix_points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
+    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_values: UnsafePointer[Float64, MutAnyOrigin],
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
@@ -299,13 +350,22 @@ def sparse_slice_dot_kernel[
         var count = Int(metadata & UInt64(0xFFFFFFFF))
         for entry in range(lane, count, FDCB_SPARSE_GROUP_SIZE):
             var coefficient = offset + entry
-            var point = point_base + _coefficient_point(
+            var local_point = _coefficient_point(
                 coefficient_points, coefficient
             )
-            total += Scalar[FDCB_ACCELERATOR_DTYPE](
-                rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](
-                    coefficients[coefficient]
-                )
+            var point = point_base + local_point
+            total += _matrix_coefficient(
+                procedural,
+                energy_slices,
+                matrix_points,
+                groups,
+                slice_groups,
+                slice_energy,
+                slice_values,
+                coefficients,
+                Int(rebind[Scalar[DType.uint32]](matrix_slice_indices[slice])),
+                local_point,
+                coefficient,
             ) * rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](particles[point])
     var sums = stack_allocation[
         FDCB_ACCELERATOR_BLOCK_SIZE,
@@ -346,6 +406,14 @@ def biological_moment_fused_kernel[
     ],
     slice_metadata: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
     slice_offsets: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
+    matrix_slice_indices: TileTensor[DType.uint32, SliceLayout, MutAnyOrigin],
+    procedural: UInt32,
+    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
+    matrix_points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
+    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_values: UnsafePointer[Float64, MutAnyOrigin],
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
@@ -409,13 +477,22 @@ def biological_moment_fused_kernel[
         var dot: Scalar[FDCB_ACCELERATOR_DTYPE] = 0.0
         for entry in range(lane, coefficient_count, FDCB_SPARSE_GROUP_SIZE):
             var coefficient = coefficient_offset + entry
-            var point = point_base + _coefficient_point(
+            var local_point = _coefficient_point(
                 coefficient_points, coefficient
             )
-            dot += Scalar[FDCB_ACCELERATOR_DTYPE](
-                rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](
-                    coefficients[coefficient]
-                )
+            var point = point_base + local_point
+            dot += _matrix_coefficient(
+                procedural,
+                energy_slices,
+                matrix_points,
+                groups,
+                slice_groups,
+                slice_energy,
+                slice_values,
+                coefficients,
+                Int(rebind[Scalar[DType.uint32]](matrix_slice_indices[slice])),
+                local_point,
+                coefficient,
             ) * rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](particles[point])
         dot = fdcb_accelerator_warp_sum(dot)
         if lane == 0:
@@ -900,6 +977,14 @@ def sparse_gradient_backprojection_kernel[
     field_point_offsets: TileTensor[DType.uint64, FieldLayout, MutAnyOrigin],
     slice_metadata: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
     slice_offsets: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
+    matrix_slice_indices: TileTensor[DType.uint32, SliceLayout, MutAnyOrigin],
+    procedural: UInt32,
+    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
+    matrix_points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
+    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_values: UnsafePointer[Float64, MutAnyOrigin],
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
@@ -942,17 +1027,26 @@ def sparse_gradient_backprojection_kernel[
     var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
     for entry in range(lane, count, FDCB_SPARSE_GROUP_SIZE):
         var coefficient = offset + entry
-        var point = point_base + _coefficient_point(
+        var local_point = _coefficient_point(
             coefficient_points, coefficient
         )
+        var point = point_base + local_point
         if (
             rebind[Scalar[DType.uint8]](point_active[point]) != UInt8(0)
             and rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](particles[point]) != 0.0
         ):
-            var contribution = scale * Scalar[FDCB_ACCELERATOR_DTYPE](
-                rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](
-                    coefficients[coefficient]
-                )
+            var contribution = scale * _matrix_coefficient(
+                procedural,
+                energy_slices,
+                matrix_points,
+                groups,
+                slice_groups,
+                slice_energy,
+                slice_values,
+                coefficients,
+                Int(rebind[Scalar[DType.uint32]](matrix_slice_indices[slice])),
+                local_point,
+                coefficient,
             )
             _ = Atomic.fetch_add[ordering=Ordering.RELAXED](
                 gradient.ptr + point, contribution
@@ -1053,6 +1147,14 @@ def bootstrap_backprojection_kernel[
     field_point_offsets: TileTensor[DType.uint64, FieldLayout, MutAnyOrigin],
     slice_metadata: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
     slice_offsets: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
+    matrix_slice_indices: TileTensor[DType.uint32, SliceLayout, MutAnyOrigin],
+    procedural: UInt32,
+    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
+    matrix_points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
+    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_values: UnsafePointer[Float64, MutAnyOrigin],
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
@@ -1089,11 +1191,22 @@ def bootstrap_backprojection_kernel[
     var lane = thread_idx.x % FDCB_SPARSE_GROUP_SIZE
     for entry in range(lane, count, FDCB_SPARSE_GROUP_SIZE):
         var coefficient = offset + entry
-        var point = point_base + _coefficient_point(
+        var local_point = _coefficient_point(
             coefficient_points, coefficient
         )
-        var contribution = scale * rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](
-            coefficients[coefficient]
+        var point = point_base + local_point
+        var contribution = scale * _matrix_coefficient(
+            procedural,
+            energy_slices,
+            matrix_points,
+            groups,
+            slice_groups,
+            slice_energy,
+            slice_values,
+            coefficients,
+            Int(rebind[Scalar[DType.uint32]](matrix_slice_indices[slice])),
+            local_point,
+            coefficient,
         )
         _ = Atomic.fetch_add[ordering=Ordering.RELAXED](
             gradient.ptr + point, contribution
@@ -1202,6 +1315,14 @@ def exact_step_terms_kernel[
     ],
     slice_metadata: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
     slice_offsets: TileTensor[DType.uint64, SliceLayout, MutAnyOrigin],
+    matrix_slice_indices: TileTensor[DType.uint32, SliceLayout, MutAnyOrigin],
+    procedural: UInt32,
+    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
+    matrix_points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
+    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
+    slice_values: UnsafePointer[Float64, MutAnyOrigin],
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
@@ -1290,13 +1411,26 @@ def exact_step_terms_kernel[
             var dot: Scalar[FDCB_ACCELERATOR_DTYPE] = 0.0
             for entry in range(lane, coefficient_count, FDCB_SPARSE_GROUP_SIZE):
                 var coefficient = coefficient_offset + entry
-                var point = point_base + _coefficient_point(
+                var local_point = _coefficient_point(
                     coefficient_points, coefficient
                 )
-                dot += Scalar[FDCB_ACCELERATOR_DTYPE](
-                    rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](
-                        coefficients[coefficient]
-                    )
+                var point = point_base + local_point
+                dot += _matrix_coefficient(
+                    procedural,
+                    energy_slices,
+                    matrix_points,
+                    groups,
+                    slice_groups,
+                    slice_energy,
+                    slice_values,
+                    coefficients,
+                    Int(
+                        rebind[Scalar[DType.uint32]](
+                            matrix_slice_indices[slice]
+                        )
+                    ),
+                    local_point,
+                    coefficient,
                 ) * rebind[Scalar[FDCB_ACCELERATOR_DTYPE]](direction[point])
             dot = fdcb_accelerator_warp_sum(dot)
             if lane == 0:
@@ -1357,12 +1491,22 @@ struct FDCBAccelerator(Movable):
     var field_offsets: DeviceBuffer[DType.uint64]
     var slice_metadata: DeviceBuffer[DType.uint64]
     var slice_offsets: DeviceBuffer[DType.uint64]
+    var matrix_slice_indices: DeviceBuffer[DType.uint32]
     var coefficient_point_owner: DeviceBuffer[DType.uint16]
     var coefficient_owner: DeviceBuffer[FDCB_ACCELERATOR_DTYPE]
     var coefficient_points: UnsafePointer[Scalar[DType.uint16], MutAnyOrigin]
     var coefficients: UnsafePointer[
         Scalar[FDCB_ACCELERATOR_DTYPE], MutAnyOrigin
     ]
+    var procedural_matrix: Bool
+    var matrix_energy_slices: UnsafePointer[
+        FDCBMatrixEnergySliceV1, MutAnyOrigin
+    ]
+    var matrix_points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin]
+    var matrix_groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin]
+    var matrix_slice_groups: UnsafePointer[UInt32, MutAnyOrigin]
+    var matrix_slice_energy: UnsafePointer[UInt32, MutAnyOrigin]
+    var matrix_slice_values: UnsafePointer[Float64, MutAnyOrigin]
     var particles: DeviceBuffer[FDCB_ACCELERATOR_DTYPE]
     var point_active: DeviceBuffer[DType.uint8]
     var slice_dot_output: DeviceBuffer[FDCB_ACCELERATOR_DTYPE]
@@ -1602,6 +1746,9 @@ struct FDCBAccelerator(Movable):
         var slice_offset_host = self.context.enqueue_create_host_buffer[
             DType.uint64
         ](self.slice_count)
+        var matrix_slice_index_host = self.context.enqueue_create_host_buffer[
+            DType.uint32
+        ](self.slice_count)
         var scenario_offset_host = self.context.enqueue_create_host_buffer[
             DType.uint64
         ](self.voxel_scenario_count)
@@ -1628,6 +1775,9 @@ struct FDCBAccelerator(Movable):
             slice_metadata_host, slice_layout
         )
         var slice_offset_tensor = TileTensor(slice_offset_host, slice_layout)
+        var matrix_slice_index_tensor = TileTensor(
+            matrix_slice_index_host, slice_layout
+        )
         var scenario_offset_tensor = TileTensor(
             scenario_offset_host, scenario_layout
         )
@@ -1667,6 +1817,7 @@ struct FDCBAccelerator(Movable):
             slice_offset_tensor[i] = UInt64(
                 Int(source.coefficient_offset) - coefficient_offset
             )
+            matrix_slice_index_tensor[i] = source.matrix_slice_index
             var factor = i * 5
             slice_factor_tensor[factor] = _pack_value(source.dose_coefficient)
             slice_factor_tensor[factor + 1] = _pack_value(
@@ -1735,8 +1886,12 @@ struct FDCBAccelerator(Movable):
         self.slice_offsets = self.context.enqueue_create_buffer[DType.uint64](
             self.slice_count
         )
+        self.matrix_slice_indices = self.context.enqueue_create_buffer[
+            DType.uint32
+        ](self.slice_count)
         self.coefficient_point_owner = coefficient_point_device^
         self.coefficient_owner = coefficient_device^
+        self.procedural_matrix = False
         if external_coefficient_count > 0:
             var matrix = matrix_storage.bitcast[FDCBMatrixStorageV1]()
             self.coefficient_points = matrix[].point_indices_device.unsafe_ptr()
@@ -1751,6 +1906,46 @@ struct FDCBAccelerator(Movable):
         else:
             self.coefficient_points = self.coefficient_point_owner.unsafe_ptr()
             self.coefficients = self.coefficient_owner.unsafe_ptr()
+        self.matrix_energy_slices = self.coefficient_points.bitcast[
+            FDCBMatrixEnergySliceV1
+        ]()
+        self.matrix_points = self.coefficient_points.bitcast[
+            FDCBMatrixPointV1
+        ]()
+        self.matrix_groups = self.coefficient_points.bitcast[
+            FDCBMatrixGroupV1
+        ]()
+        self.matrix_slice_groups = self.coefficient_points.bitcast[UInt32]()
+        self.matrix_slice_energy = self.coefficient_points.bitcast[UInt32]()
+        self.matrix_slice_values = self.coefficient_points.bitcast[Float64]()
+        if external_coefficient_count > 0:
+            var matrix_view = matrix_storage.bitcast[FDCBMatrixStorageV1]()
+            self.procedural_matrix = matrix_view[].procedural
+            if self.procedural_matrix:
+                self.matrix_energy_slices = (
+                    matrix_view[]
+                    .energy_slices_device.unsafe_ptr()
+                    .bitcast[FDCBMatrixEnergySliceV1]()
+                )
+                self.matrix_points = (
+                    matrix_view[]
+                    .points_device.unsafe_ptr()
+                    .bitcast[FDCBMatrixPointV1]()
+                )
+                self.matrix_groups = (
+                    matrix_view[]
+                    .groups_device.unsafe_ptr()
+                    .bitcast[FDCBMatrixGroupV1]()
+                )
+                self.matrix_slice_groups = (
+                    matrix_view[].slice_groups_device.unsafe_ptr()
+                )
+                self.matrix_slice_energy = (
+                    matrix_view[].slice_energy_device.unsafe_ptr()
+                )
+                self.matrix_slice_values = (
+                    matrix_view[].slice_values_device.unsafe_ptr()
+                )
         self.particles = self.context.enqueue_create_buffer[
             FDCB_ACCELERATOR_DTYPE
         ](self.point_count)
@@ -1805,6 +2000,9 @@ struct FDCBAccelerator(Movable):
         self.context.enqueue_copy(self.field_offsets, field_host)
         self.context.enqueue_copy(self.slice_metadata, slice_metadata_host)
         self.context.enqueue_copy(self.slice_offsets, slice_offset_host)
+        self.context.enqueue_copy(
+            self.matrix_slice_indices, matrix_slice_index_host
+        )
         self.context.enqueue_copy(self.point_active, active_host)
         self.context.enqueue_copy(
             self.scenario_slice_offsets, scenario_offset_host
@@ -1851,6 +2049,14 @@ struct FDCBAccelerator(Movable):
             TileTensor(self.field_offsets, field_layout),
             TileTensor(self.slice_metadata, slice_layout),
             TileTensor(self.slice_offsets, slice_layout),
+            TileTensor(self.matrix_slice_indices, slice_layout),
+            UInt32(1) if self.procedural_matrix else UInt32(0),
+            self.matrix_energy_slices,
+            self.matrix_points,
+            self.matrix_groups,
+            self.matrix_slice_groups,
+            self.matrix_slice_energy,
+            self.matrix_slice_values,
             TileTensor(self.coefficient_points, coefficient_point_layout),
             TileTensor(self.coefficients, coefficient_layout),
             TileTensor(self.particles, point_layout),
@@ -1939,6 +2145,14 @@ struct FDCBAccelerator(Movable):
                 TileTensor(self.field_offsets, field_layout),
                 TileTensor(self.slice_metadata, slice_layout),
                 TileTensor(self.slice_offsets, slice_layout),
+                TileTensor(self.matrix_slice_indices, slice_layout),
+                UInt32(1) if self.procedural_matrix else UInt32(0),
+                self.matrix_energy_slices,
+                self.matrix_points,
+                self.matrix_groups,
+                self.matrix_slice_groups,
+                self.matrix_slice_energy,
+                self.matrix_slice_values,
                 TileTensor(self.coefficient_points, coefficient_point_layout),
                 TileTensor(self.coefficients, coefficient_layout),
                 TileTensor(self.slice_dot_output, slice_layout),
@@ -2001,6 +2215,14 @@ struct FDCBAccelerator(Movable):
             TileTensor(self.scenario_slice_counts, scenario_layout),
             TileTensor(self.slice_metadata, slice_layout),
             TileTensor(self.slice_offsets, slice_layout),
+            TileTensor(self.matrix_slice_indices, slice_layout),
+            UInt32(1) if self.procedural_matrix else UInt32(0),
+            self.matrix_energy_slices,
+            self.matrix_points,
+            self.matrix_groups,
+            self.matrix_slice_groups,
+            self.matrix_slice_energy,
+            self.matrix_slice_values,
             TileTensor(self.coefficient_points, coefficient_point_layout),
             TileTensor(self.coefficients, coefficient_layout),
             TileTensor(self.particles, point_layout),
@@ -2050,6 +2272,14 @@ struct FDCBAccelerator(Movable):
             TileTensor(self.scenario_slice_counts, scenario_layout),
             TileTensor(self.slice_metadata, slice_layout),
             TileTensor(self.slice_offsets, slice_layout),
+            TileTensor(self.matrix_slice_indices, slice_layout),
+            UInt32(1) if self.procedural_matrix else UInt32(0),
+            self.matrix_energy_slices,
+            self.matrix_points,
+            self.matrix_groups,
+            self.matrix_slice_groups,
+            self.matrix_slice_energy,
+            self.matrix_slice_values,
             TileTensor(self.coefficient_points, coefficient_point_layout),
             TileTensor(self.coefficients, coefficient_layout),
             TileTensor(self.particles, point_layout),
@@ -2237,6 +2467,14 @@ struct FDCBAccelerator(Movable):
                 TileTensor(self.field_offsets, field_layout),
                 TileTensor(self.slice_metadata, slice_layout),
                 TileTensor(self.slice_offsets, slice_layout),
+                TileTensor(self.matrix_slice_indices, slice_layout),
+                UInt32(1) if self.procedural_matrix else UInt32(0),
+                self.matrix_energy_slices,
+                self.matrix_points,
+                self.matrix_groups,
+                self.matrix_slice_groups,
+                self.matrix_slice_energy,
+                self.matrix_slice_values,
                 TileTensor(self.coefficient_points, coefficient_point_layout),
                 TileTensor(self.coefficients, coefficient_layout),
                 TileTensor(self.point_active, point_layout),

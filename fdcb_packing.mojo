@@ -200,6 +200,7 @@ def pack_physical_fdcb_problem_v1_with_fields(
                 slices.append(
                     FDCBSliceV1(
                         UInt32(field_slice_index),
+                        UInt32(0),
                         coefficient_offset,
                         UInt32(UInt64(len(coefficients)) - coefficient_offset),
                         1.0 / FDCB_MEV_TO_GY,
@@ -369,6 +370,7 @@ def pack_biological_fdcb_problem_v1_with_fields(
                 slices.append(
                     FDCBSliceV1(
                         UInt32(field_slice_index),
+                        UInt32(0),
                         coefficient_offset,
                         UInt32(UInt64(len(coefficients)) - coefficient_offset),
                         ddd,

@@ -12,13 +12,28 @@ struct FDCBMojoMatrixArena {
    uint64_t entry_count;
    uint64_t references;
    uint32_t device_id;
+   int procedural;
    uint64_t voxel_offset;
    uint64_t voxel_count;
+   uint32_t group_count;
+   uint64_t *group_offsets;
+   uint32_t *group_slice_offsets;
+   uint32_t *group_beam_counts;
    FDCBMatrixStorageV1 *storage;
    struct FDCBMojoMatrixArena *next;
 };
 
 static struct FDCBMojoMatrixArena *gFDCBMojoMatrixArenas = NULL;
+
+static void FDCBMojoMatrixFreeArena(struct FDCBMojoMatrixArena *arena) {
+   if ( arena == NULL ) return;
+   if ( arena->storage != NULL )
+      trip_fdcb_matrix_storage_destroy_v1(arena->storage);
+   free(arena->group_offsets);
+   free(arena->group_slice_offsets);
+   free(arena->group_beam_counts);
+   free(arena);
+}
 
 static int FDCBMojoMatrixDirectView(
    FDCBMatrixStorageV1 **storage,
@@ -79,20 +94,18 @@ static void FDCBMojoMatrixReleaseArenas(void) {
    while ( gFDCBMojoMatrixArenas != NULL ) {
       struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
       gFDCBMojoMatrixArenas = arena->next;
-      if ( arena->storage != NULL )
-         trip_fdcb_matrix_storage_destroy_v1(arena->storage);
-      free(arena);
+      FDCBMojoMatrixFreeArena(arena);
    }
 }
 
 static struct FDCBMojoMatrixArena *FDCBMojoMatrixDoseArena(
    const struct STRPFLDDOSE *dose
 ) {
-   uintptr_t address = (uintptr_t) dose->sFDCPstore.pdG;
+   uintptr_t address = (uintptr_t) dose->sFDCPstore.piPnt;
    for ( struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
          arena != NULL; arena = arena->next ) {
-      uintptr_t begin = (uintptr_t) arena->coefficients;
-      uintptr_t end = begin + arena->entry_count * sizeof(*arena->coefficients);
+      uintptr_t begin = (uintptr_t) arena->point_indices;
+      uintptr_t end = begin + arena->entry_count * sizeof(*arena->point_indices);
       if ( address >= begin && address < end ) return arena;
    }
    return NULL;
@@ -102,17 +115,62 @@ static int FDCBMojoMatrixDirectSlice(
    const struct STRPFLDDOSE *dose,
    int voxel,
    const struct STRPFLDDOSECORRSLICE *slice,
-   uint64_t *offset
+   uint64_t *offset,
+   uint32_t *matrix_slice_index
 ) {
+   static __thread struct FDCBMojoMatrixArena *cached_arena = NULL;
+   static __thread const struct STRPFLDDOSECORRSLICE *cached_slices = NULL;
+   static __thread uint64_t cached_group_offset = UINT64_MAX;
+   static __thread uint32_t cached_group = 0;
    struct FDCBMojoMatrixArena *arena = FDCBMojoMatrixDoseArena(dose);
    uint64_t direct_offset;
    (void) voxel;
    if ( arena == NULL ) return -1;
-   direct_offset = (uint64_t) (slice->sFDCP.pdG - arena->coefficients);
+   direct_offset = (uint64_t) (slice->sFDCP.piPnt - arena->point_indices);
    if ( slice->sFDCP.nPnt > arena->entry_count ||
         direct_offset > arena->entry_count - slice->sFDCP.nPnt ||
-        slice->sFDCP.piPnt != arena->point_indices + direct_offset )
+        (!arena->procedural &&
+         slice->sFDCP.pdG != arena->coefficients + direct_offset) )
       return -1;
+   *matrix_slice_index = 0;
+   if ( arena->procedural ) {
+      uint64_t group_offset = (uint64_t) (
+         dose->sFDCPstore.piPnt - arena->point_indices);
+      uint32_t group = cached_group;
+      if ( cached_arena != arena || cached_slices != dose->psFDCS ||
+           cached_group_offset != group_offset ) {
+         uint32_t lo = 0;
+         uint32_t hi = arena->group_count + 1;
+         while ( lo < hi ) {
+            uint32_t middle = lo + (hi - lo) / 2;
+            if ( arena->group_offsets[middle] <= group_offset )
+               lo = middle + 1;
+            else
+               hi = middle;
+         }
+         if ( lo == 0 ) return -1;
+         group = lo - 1;
+         if ( group >= arena->group_count ||
+              arena->group_offsets[group] != group_offset ||
+              arena->group_offsets[group + 1] - group_offset !=
+                 dose->sFDCPstore.nPnt )
+            return -1;
+         cached_arena = arena;
+         cached_slices = dose->psFDCS;
+         cached_group_offset = group_offset;
+         cached_group = group;
+      }
+      {
+         ptrdiff_t beam = slice - dose->psFDCS;
+         uint32_t beam_count = arena->group_beam_counts[group];
+         uint64_t source_slice;
+         if ( beam < 0 || (uint64_t) beam >= beam_count ) return -1;
+         source_slice = arena->group_slice_offsets[group] + beam_count - 1u -
+                        (uint64_t) beam;
+         if ( source_slice > UINT32_MAX ) return -1;
+         *matrix_slice_index = (uint32_t) source_slice;
+      }
+   }
    *offset = direct_offset;
    return 0;
 }
@@ -148,9 +206,7 @@ static void FDCBMojoMatrixDiscardUnreferencedArenas(void) {
          continue;
       }
       *link = arena->next;
-      if ( arena->storage != NULL )
-         trip_fdcb_matrix_storage_destroy_v1(arena->storage);
-      free(arena);
+      FDCBMojoMatrixFreeArena(arena);
    }
 }
 
@@ -374,23 +430,56 @@ static int FDCBMojoMatrixImport(
    arena->coefficients = (double *) result->coefficients;
    arena->point_indices = (uint16_t *) result->point_indices;
    arena->storage = storage;
+   arena->procedural =
+      (result->flags & FDCB_MATRIX_RESULT_PROCEDURAL) != 0;
    arena->device_id = build->device_id;
    arena->voxel_offset = build->voxel_offset;
    arena->voxel_count = build->voxel_count;
+   arena->group_count = build->group_count;
+   if ( arena->procedural ) {
+      arena->group_slice_offsets = calloc(
+         build->group_count, sizeof(*arena->group_slice_offsets));
+      arena->group_beam_counts = calloc(
+         build->group_count, sizeof(*arena->group_beam_counts));
+      if ( arena->group_slice_offsets == NULL ||
+           arena->group_beam_counts == NULL ) {
+         free(group_offsets);
+         free(arena->group_slice_offsets);
+         free(arena->group_beam_counts);
+         free(arena);
+         return CMDERR_ERROR | ERRTRPOPT_SYS;
+      }
+   }
    for ( uint32_t group = 0; group < build->group_count; ++group ) {
       struct STRPFLDDOSE *dose = build->group_hosts[group].dose;
       uint32_t beam_count = build->group_hosts[group].beam_count;
       if ( dose == NULL || dose->psFDCS == NULL ||
            dose->nFDC < (int) beam_count ) {
          free(group_offsets);
+         free(arena->group_slice_offsets);
+         free(arena->group_beam_counts);
          free(arena);
          return CMDERR_ERROR | ERRTRPOPT_BADADDR;
+      }
+      if ( arena->procedural ) {
+         if ( build->groups[group].slice_offset > UINT32_MAX ) {
+            free(group_offsets);
+            free(arena->group_slice_offsets);
+            free(arena->group_beam_counts);
+            free(arena);
+            return CMDERR_ERROR | ERRTRPOPT_BADADDR;
+         }
+         arena->group_slice_offsets[group] =
+            (uint32_t) build->groups[group].slice_offset;
+         arena->group_beam_counts[group] = beam_count;
       }
       group_offsets[group + 1] = group_offsets[group] +
                                  result->group_entry_counts[group];
    }
    if ( group_offsets[build->group_count] != result->entry_count ) {
       free(group_offsets);
+      free(arena->group_slice_offsets);
+      free(arena->group_beam_counts);
       free(arena);
       return CMDERR_ERROR | ERRTRPOPT_BADADDR;
    }
@@ -405,7 +494,8 @@ static int FDCBMojoMatrixImport(
       uint64_t entry_offset = group_offsets[group_index];
       uint32_t local_offset = 0;
       if ( dose->sFDCPstore.mPnt ) TRPFDCPfree(&dose->sFDCPstore);
-      dose->sFDCPstore.pdG = arena->coefficients + entry_offset;
+      dose->sFDCPstore.pdG = arena->procedural ?
+         arena->coefficients : arena->coefficients + entry_offset;
       dose->sFDCPstore.piPnt = arena->point_indices + entry_offset;
       dose->sFDCPstore.nPnt = group_entries;
       dose->sFDCPstore.mPnt = 0;
@@ -422,7 +512,8 @@ static int FDCBMojoMatrixImport(
          destination->sFDCP.nPnt = count;
          destination->sFDCP.mPnt = 0;
          destination->sFDCP.piPnt = arena->point_indices + entry_offset;
-         destination->sFDCP.pdG = arena->coefficients + entry_offset;
+         destination->sFDCP.pdG = arena->procedural ?
+            arena->coefficients : arena->coefficients + entry_offset;
          local_offset += count;
          entry_offset += count;
       }
@@ -435,11 +526,17 @@ static int FDCBMojoMatrixImport(
          __atomic_store_n(build->field_nonempty + field_index, 1,
                           __ATOMIC_RELAXED);
    }
-   free(group_offsets);
    if ( import_error ) {
+      free(group_offsets);
+      free(arena->group_slice_offsets);
+      free(arena->group_beam_counts);
       free(arena);
       return CMDERR_ERROR | ERRTRPOPT_BADADDR;
    }
+   if ( arena->procedural )
+      arena->group_offsets = group_offsets;
+   else
+      free(group_offsets);
    arena->next = gFDCBMojoMatrixArenas;
    arena->entry_count = result->entry_count;
    gFDCBMojoMatrixArenas = arena;

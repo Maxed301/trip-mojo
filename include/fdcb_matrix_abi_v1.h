@@ -11,8 +11,13 @@ extern "C" {
 
 enum {
     FDCB_MATRIX_FLAG_DEVICE_ONLY = 1u << 0,
+    FDCB_MATRIX_FLAG_FORCE_PROCEDURAL = 1u << 1,
     FDCB_MATRIX_DEVICE_ID_SHIFT = 8,
     FDCB_MATRIX_DEVICE_ID_MASK = 0xffu << FDCB_MATRIX_DEVICE_ID_SHIFT,
+};
+
+enum {
+    FDCB_MATRIX_RESULT_PROCEDURAL = 1u << 0,
 };
 
 typedef struct {
@@ -91,7 +96,7 @@ typedef struct {
     uint64_t entry_count;
     uint64_t slice_count;
     uint32_t group_count;
-    uint32_t reserved;
+    uint32_t flags;
     const double *group_maximum;
     const uint32_t *group_entry_counts;
     const uint32_t *slice_entry_counts;

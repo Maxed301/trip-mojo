@@ -14,7 +14,7 @@ canonical local and cluster paths.
 |---|---|
 | CPU FDCB | P101 3D robust biological plan stops at iteration 271 and writes byte-identical RSTs. |
 | NVIDIA FDCB | P101 ten-state, nine-scenario 4D robust plan stops at iteration 120 and writes byte-identical RSTs on H200. |
-| NVIDIA multi-GPU | The same 4D plan uses direct coefficient-balanced matrix shards across two or three H200s and remains byte-identical. |
+| NVIDIA multi-GPU | Direct coefficient-balanced shards remain byte-identical; oversized shards automatically retain topology and reconstruct exact Float64 coefficients. |
 | CPU dose | Full static P101 physical/biological cubes match within one/two Float32 output ULPs. |
 | NVIDIA dose | Same complete static case and support validated on H200. |
 | 4D dose | P101 ten-state perfect-rescan physical/biological cubes are byte-identical to `trip_temp` on H200. |
@@ -130,8 +130,10 @@ loading, deformation and state-aware output stay in TRiP.
 `fdcb_packing.mojo` converts convenient native test models into this numeric
 layout. Production C integration avoids another full copy: Mojo allocates the
 arrays, returns temporary writable pointers, and owns them until storage
-destruction. The direct matrix boundary keeps coefficients and UInt16 indices
-on the accelerator and transfers only compact metadata into the optimizer.
+destruction. The direct matrix boundary keeps UInt16 topology on the
+accelerator and transfers only compact metadata into the optimizer. Shards up
+to ten billion entries also retain Float64 coefficients; larger shards retain
+geometry and reconstruct the same double-Gaussian coefficient on demand.
 
 The CPU and accelerator evaluators share the host iteration controller,
 stopping rules, Fletcher-Reeves updates, backtracking and host-side

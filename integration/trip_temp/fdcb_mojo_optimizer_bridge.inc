@@ -84,7 +84,8 @@ static int FDCBMojoMatrixDirectViews(
    uint64_t *voxel_counts);
 static int FDCBMojoMatrixDirectSlice(
    const struct STRPFLDDOSE *dose, int voxel,
-   const struct STRPFLDDOSECORRSLICE *slice, uint64_t *offset);
+   const struct STRPFLDDOSECORRSLICE *slice, uint64_t *offset,
+   uint32_t *matrix_slice_index);
 static int FDCBMojoMatrixDoseDevice(const struct STRPFLDDOSE *dose);
 
 static struct STRPOPTVOX *FDCBMojoScenarioVoxel(
@@ -461,12 +462,13 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
                      FDCBSliceV1 *output = arrays.slices + slice++;
                      output->field_slice_index =
                         field_base[field] + (uint32_t) beam;
-                     output->reserved = 0;
+                     output->matrix_slice_index = 0;
                      if ( direct_matrix ) {
                         uint64_t direct_offset;
                         if ( FDCBMojoMatrixDirectSlice(
                                 source->psFD + field, voxel, input,
-                                &direct_offset) != 0 ) {
+                                &direct_offset,
+                                &output->matrix_slice_index) != 0 ) {
 #pragma omp atomic write
                            direct_pack_error = 1;
                            continue;

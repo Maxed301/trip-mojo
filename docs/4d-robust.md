@@ -11,11 +11,15 @@ voxel 1 -> scenarios 0..N-1 -> sparse slices -> coefficients
 ...
 ```
 
-Mojo owns the packed metadata arrays. The matrix builder creates Float64
-coefficients and slice-local UInt16 point indices on the accelerator; the
-optimizer consumes them without a host coefficient copy. Distinct robust
-scenario matrices are retained. TRiP releases completed source matrices while
-packing so the nested and packed forms are not both fully resident.
+Mojo owns the packed metadata arrays. The matrix builder always creates the
+slice-local UInt16 topology on the accelerator. A shard with at most ten
+billion entries also stores its Float64 coefficients. A larger shard retains
+the geometry and exact double-Gaussian parameters instead, then reconstructs
+each coefficient in the optimizer with the same Float64 expression used during
+matrix construction. This selection is automatic and has no environment or
+command-line flag. Distinct robust scenario matrices are retained. TRiP
+releases completed source matrices while packing so the nested and packed
+forms are not both fully resident.
 
 ## Canonical case
 
@@ -66,6 +70,25 @@ does not create a complete host coefficient matrix. The canonical nine-scenario
 case remains byte-identical on one, two and three H200s. Current Slurm walltimes
 are 30 s, 28 s and 28 s respectively; optimizer time is 7.161 s on one H200,
 4.570 s on two and 3.690 s on three.
+
+The procedural representation changes the dominant entry payload from one
+UInt16 index plus one Float64 coefficient (10 bytes) to the UInt16 index alone
+(2 bytes), an exact 80% reduction. It additionally retains compact geometry and
+88 bytes of parameters per matrix slice. The 21-scenario P101 plan contains
+15,296,352,715 matrix entries, so its entry payload falls from 152.96 GB to
+30.59 GB, saving 122.37 GB before the retained slice metadata. H200 job 23228
+therefore ran on one device where the materialized matrix did not fit. It
+stopped at iteration 208, wrote RSTs byte-identical to the materialized
+two-device job 23210, and measured 58.784 s for optimization and 1:35 walltime.
+
+The 81-scenario plan contains 56,514,021,756 packed coefficient references.
+Job 23230 split 58,812,585,971 matrix entries into three procedural shards,
+completed 148 iterations in 66.308 s, and measured 3:04 walltime with
+196,652,932 KiB peak host RSS. This is a capacity and scaling result; there is
+no materialized 81-scenario result against which to claim parity. The current
+exact recomputation is about twice the extrapolated materialized cost per
+device. A row-wise separable Gaussian cache is a possible next optimization,
+but it must preserve the optimizer trajectory before replacing the exact path.
 
 ## Integration
 

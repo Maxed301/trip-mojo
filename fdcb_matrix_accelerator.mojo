@@ -12,11 +12,14 @@ from std.time import perf_counter_ns
 
 comptime FDCB_MATRIX_ABI_VERSION_V1 = UInt32(1)
 comptime FDCB_MATRIX_FLAG_DEVICE_ONLY = UInt32(1)
+comptime FDCB_MATRIX_FLAG_FORCE_PROCEDURAL = UInt32(2)
 comptime FDCB_MATRIX_DEVICE_ID_SHIFT = 8
 comptime FDCB_MATRIX_DEVICE_ID_MASK = UInt32(0xFF00)
 comptime FDCB_MATRIX_BLOCK_SIZE = 128
 comptime FDCB_MATRIX_FILL_BLOCK_SIZE = 128
 comptime FDCB_MATRIX_FILL_WARPS = FDCB_MATRIX_FILL_BLOCK_SIZE // WARP_SIZE
+comptime FDCB_MATRIX_MATERIALIZED_ENTRY_LIMIT = UInt64(10_000_000_000)
+comptime FDCB_MATRIX_RESULT_PROCEDURAL = UInt32(1)
 comptime FDCB_MATRIX_REDUCTION_GROUP_SIZE = 32
 comptime FDCB_MATRIX_REDUCTION_GROUPS = (
     FDCB_MATRIX_BLOCK_SIZE // FDCB_MATRIX_REDUCTION_GROUP_SIZE
@@ -111,7 +114,7 @@ struct FDCBMatrixResultV1(Copyable, Movable):
     var entry_count: UInt64
     var slice_count: UInt64
     var group_count: UInt32
-    var reserved: UInt32
+    var flags: UInt32
     var group_maximum: UnsafePointer[Float64, MutAnyOrigin]
     var group_entry_counts: UnsafePointer[UInt32, MutAnyOrigin]
     var slice_entry_counts: UnsafePointer[UInt32, MutAnyOrigin]
@@ -124,9 +127,16 @@ struct FDCBMatrixResultV1(Copyable, Movable):
 struct FDCBMatrixStorageV1(Movable):
     var context: DeviceContext
     var device_only: Bool
+    var procedural: Bool
     var entry_count: Int
     var point_indices_device: DeviceBuffer[DType.uint16]
     var coefficients_device: DeviceBuffer[DType.float64]
+    var energy_slices_device: DeviceBuffer[DType.uint8]
+    var points_device: DeviceBuffer[DType.uint8]
+    var groups_device: DeviceBuffer[DType.uint8]
+    var slice_groups_device: DeviceBuffer[DType.uint32]
+    var slice_energy_device: DeviceBuffer[DType.uint32]
+    var slice_values_device: DeviceBuffer[DType.float64]
     var group_maximum: HostBuffer[DType.float64]
     var group_entry_counts: HostBuffer[DType.uint32]
     var slice_entry_counts: HostBuffer[DType.uint32]
@@ -214,6 +224,7 @@ def _materialize_raw_slices_kernel(
     ddd_entries: UnsafePointer[FDCBMatrixDDDEntryV1, MutAnyOrigin],
     group_count: Int,
     maximum_group_slices: Int,
+    slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
     slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
     slice_values: UnsafePointer[Float64, MutAnyOrigin],
     slice_dose: UnsafePointer[Float64, MutAnyOrigin],
@@ -236,6 +247,7 @@ def _materialize_raw_slices_kernel(
         (raw_group.depth_mm + raw_energy.depth_shift_mm) * 0.1,
     )
     var offset = slice_index * 10
+    slice_groups[slice_index] = UInt32(group_index)
     slice_energy[slice_index] = raw_energy.energy_slice
     for value_index in range(10):
         slice_values[offset + value_index] = 0.0
@@ -489,6 +501,7 @@ def _fill_kernel(
     group_count: Int,
     point_indices: UnsafePointer[UInt16, MutAnyOrigin],
     coefficients: UnsafePointer[Float64, MutAnyOrigin],
+    write_coefficients: UInt32,
 ):
     var thread = thread_idx.x
     var group_index = global_idx.x // FDCB_MATRIX_FILL_BLOCK_SIZE
@@ -531,7 +544,8 @@ def _fill_kernel(
             if keep != UInt32(0):
                 var index = output + Int(position)
                 point_indices[index] = UInt16(point)
-                coefficients[index] = coefficient
+                if write_coefficients != UInt32(0):
+                    coefficients[index] = coefficient
             output += Int(batch_count)
 
 
@@ -539,7 +553,9 @@ def _validate_matrix_view(view: FDCBMatrixProblemViewV1) raises:
     if view.version != FDCB_MATRIX_ABI_VERSION_V1:
         raise Error("unsupported FDCB matrix ABI version")
     if view.flags & ~(
-        FDCB_MATRIX_FLAG_DEVICE_ONLY | FDCB_MATRIX_DEVICE_ID_MASK
+        FDCB_MATRIX_FLAG_DEVICE_ONLY
+        | FDCB_MATRIX_FLAG_FORCE_PROCEDURAL
+        | FDCB_MATRIX_DEVICE_ID_MASK
     ) != UInt32(0):
         raise Error("FDCB matrix flags are invalid")
     if view.group_count == UInt32(0):
@@ -663,6 +679,9 @@ def build_fdcb_matrix_accelerator_v1(
     var slice_energy_device = context.enqueue_create_buffer[DType.uint32](
         slice_count
     )
+    var slice_groups_device = context.enqueue_create_buffer[DType.uint32](
+        slice_count
+    )
     var slice_values_device = context.enqueue_create_buffer[DType.float64](
         slice_count * 10
     )
@@ -687,6 +706,7 @@ def build_fdcb_matrix_accelerator_v1(
         entry_device,
         group_count,
         Int(view.maximum_group_slices),
+        slice_groups_device.unsafe_ptr(),
         slice_energy_device.unsafe_ptr(),
         slice_values_device.unsafe_ptr(),
         slice_dose_device.unsafe_ptr(),
@@ -740,11 +760,22 @@ def build_fdcb_matrix_accelerator_v1(
     var allocation_count = output_count
     if allocation_count == 0:
         allocation_count = 1
+    var device_only = (view.flags & FDCB_MATRIX_FLAG_DEVICE_ONLY) != UInt32(0)
+    var procedural = (
+        device_only
+        and (
+            total_entries > FDCB_MATRIX_MATERIALIZED_ENTRY_LIMIT
+            or (view.flags & FDCB_MATRIX_FLAG_FORCE_PROCEDURAL) != UInt32(0)
+        )
+    )
     var point_indices_device = context.enqueue_create_buffer[DType.uint16](
         allocation_count
     )
+    var coefficient_allocation_count = allocation_count
+    if procedural:
+        coefficient_allocation_count = 1
     var coefficients_device = context.enqueue_create_buffer[DType.float64](
-        allocation_count
+        coefficient_allocation_count
     )
     context.enqueue_function[_fill_kernel](
         energy_device,
@@ -757,10 +788,10 @@ def build_fdcb_matrix_accelerator_v1(
         group_count,
         point_indices_device.unsafe_ptr(),
         coefficients_device.unsafe_ptr(),
+        UInt32(0) if procedural else UInt32(1),
         grid_dim=group_count,
         block_dim=FDCB_MATRIX_FILL_BLOCK_SIZE,
     )
-    var device_only = (view.flags & FDCB_MATRIX_FLAG_DEVICE_ONLY) != UInt32(0)
     var host_output_count = allocation_count
     if device_only:
         host_output_count = 1
@@ -783,14 +814,56 @@ def build_fdcb_matrix_accelerator_v1(
         " sec",
         sep="",
     )
+    print(
+        "<I> FDCB matrix representation=",
+        "procedural" if procedural else "materialized",
+        " entries=",
+        total_entries,
+        sep="",
+    )
+    var stored_device_bytes = total_entries * UInt64(10)
+    if procedural:
+        stored_device_bytes = (
+            total_entries * UInt64(2)
+            + UInt64(energy_count * size_of[FDCBMatrixEnergySliceV1]())
+            + UInt64(point_count * size_of[FDCBMatrixPointV1]())
+            + UInt64(group_count * size_of[FDCBMatrixGroupV1]())
+            + UInt64(slice_count) * UInt64(88)
+            + UInt64(8)
+        )
+    print(
+        "<I> FDCB matrix stored-device-bytes=",
+        stored_device_bytes,
+        sep="",
+    )
+    var stored_energy_slices = context.enqueue_create_buffer[DType.uint8](1)
+    var stored_points = context.enqueue_create_buffer[DType.uint8](1)
+    var stored_groups = context.enqueue_create_buffer[DType.uint8](1)
+    var stored_slice_groups = context.enqueue_create_buffer[DType.uint32](1)
+    var stored_slice_energy = context.enqueue_create_buffer[DType.uint32](1)
+    var stored_slice_values = context.enqueue_create_buffer[DType.float64](1)
+    if procedural:
+        stored_energy_slices = energy_device_bytes^
+        stored_points = point_device_bytes^
+        stored_groups = group_device_bytes^
+        stored_slice_groups = slice_groups_device^
+        stored_slice_energy = slice_energy_device^
+        stored_slice_values = slice_values_device^
     var storage = alloc[FDCBMatrixStorageV1](1)
     storage.init_pointee_move(
         FDCBMatrixStorageV1(
             context^,
             device_only,
+            procedural,
             output_count,
             point_indices_device^,
             coefficients_device^,
+            stored_energy_slices^,
+            stored_points^,
+            stored_groups^,
+            stored_slice_groups^,
+            stored_slice_energy^,
+            stored_slice_values^,
             group_maximum_host^,
             group_counts_host^,
             slice_counts_host^,
@@ -804,11 +877,14 @@ def build_fdcb_matrix_accelerator_v1(
     if device_only:
         result_point_indices = storage[].point_indices_device.unsafe_ptr()
         result_coefficients = storage[].coefficients_device.unsafe_ptr()
+    var result_flags = UInt32(0)
+    if procedural:
+        result_flags = FDCB_MATRIX_RESULT_PROCEDURAL
     result_out[] = FDCBMatrixResultV1(
         total_entries,
         view.slice_count,
         view.group_count,
-        UInt32(0),
+        result_flags,
         storage[].group_maximum.unsafe_ptr(),
         storage[].group_entry_counts.unsafe_ptr(),
         storage[].slice_entry_counts.unsafe_ptr(),
