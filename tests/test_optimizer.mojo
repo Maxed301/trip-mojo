@@ -1,19 +1,19 @@
 from std.testing import assert_equal, assert_true
 
-from fdcb_optimize import (
-    FDCB_STOP_CHI_SQUARE_LIMIT,
-    FDCB_STOP_MAX_ITERATIONS,
-    evaluate_packed_iteration,
+from optimizer import (
+    STOP_CHI_SQUARE_LIMIT,
+    STOP_MAX_ITERATIONS,
+    evaluate_objective,
     fletcher_reeves_direction,
     initial_direction,
-    optimize_packed_fdcb,
+    optimize_on_cpu,
 )
-from fdcb_problem import (
-    FDCBFieldSliceV1,
-    FDCB_FLAG_INITIALIZE,
-    evaluate_packed_physical_fdcb,
+from optimization_problem import (
+    FieldSlice,
+    OPTIMIZER_FLAG_INITIALIZE,
+    evaluate_physical_objective,
 )
-from test_fdcb_problem import build_problem
+from test_optimization_problem import build_problem
 
 
 def test_full_iteration_reduces_chi2() raises:
@@ -21,8 +21,8 @@ def test_full_iteration_reduces_chi2() raises:
     problem.settings.max_iterations = UInt32(20)
     problem.settings.grace_iterations = UInt32(5)
     problem.settings.epsilon = 1.0e-12
-    var initial = evaluate_packed_physical_fdcb(problem, problem.particles)
-    var result = optimize_packed_fdcb(problem)
+    var initial = evaluate_physical_objective(problem, problem.particles)
+    var result = optimize_on_cpu(problem)
     assert_true(result.iterations > UInt32(0))
     assert_true(result.iterations <= problem.settings.max_iterations)
     assert_true(result.chi2 < initial.chi2)
@@ -32,9 +32,9 @@ def test_chi_square_limit_stops_without_changing_tolerance() raises:
     var problem = build_problem()
     problem.settings.max_iterations = UInt32(20)
     problem.settings.chi_square_limit = 100.0
-    var result = optimize_packed_fdcb(problem)
+    var result = optimize_on_cpu(problem)
     assert_equal(result.iterations, UInt32(1))
-    assert_equal(result.stop_reason, FDCB_STOP_CHI_SQUARE_LIMIT)
+    assert_equal(result.stop_reason, STOP_CHI_SQUARE_LIMIT)
 
 
 def test_oversized_step_backtracks() raises:
@@ -42,8 +42,8 @@ def test_oversized_step_backtracks() raises:
     problem.settings.max_iterations = UInt32(2)
     problem.settings.grace_iterations = UInt32(0)
     problem.settings.configured_step_factor = 100.0
-    var initial = evaluate_packed_iteration(problem, problem.particles)
-    var result = optimize_packed_fdcb(problem)
+    var initial = evaluate_objective(problem, problem.particles)
+    var result = optimize_on_cpu(problem)
     assert_true(result.backtracks > UInt64(0))
     assert_true(result.chi2 < initial.chi2)
 
@@ -53,9 +53,9 @@ def test_max_iterations_are_not_capped() raises:
     problem.settings.max_iterations = UInt32(7)
     problem.settings.grace_iterations = UInt32(100)
     problem.settings.epsilon = 0.0
-    var result = optimize_packed_fdcb(problem)
+    var result = optimize_on_cpu(problem)
     assert_equal(result.iterations, UInt32(7))
-    assert_equal(result.stop_reason, FDCB_STOP_MAX_ITERATIONS)
+    assert_equal(result.stop_reason, STOP_MAX_ITERATIONS)
 
 
 def test_complex_minimum_particles_are_repeatable() raises:
@@ -65,8 +65,8 @@ def test_complex_minimum_particles_are_repeatable() raises:
     problem.settings.epsilon = 0.0
     problem.field_slices[0].minimum_particles = 120.0
     problem.field_slices[0].raster_stride = UInt32(2)
-    var first = optimize_packed_fdcb(problem)
-    var second = optimize_packed_fdcb(problem)
+    var first = optimize_on_cpu(problem)
+    var second = optimize_on_cpu(problem)
     assert_equal(first.particles[0], second.particles[0])
     assert_equal(first.particles[1], second.particles[1])
     assert_equal(first.random_draws, second.random_draws)
@@ -77,11 +77,11 @@ def test_initialization_is_not_counted_as_trip_iteration() raises:
     var problem = build_problem()
     problem.particles[0] = 0.0
     problem.particles[1] = 0.0
-    problem.settings.flags |= FDCB_FLAG_INITIALIZE
+    problem.settings.flags |= OPTIMIZER_FLAG_INITIALIZE
     problem.settings.max_iterations = UInt32(1)
-    var initial = evaluate_packed_iteration(problem, problem.particles)
+    var initial = evaluate_objective(problem, problem.particles)
     assert_equal(initial.gradient_norm, 0.0)
-    var result = optimize_packed_fdcb(problem)
+    var result = optimize_on_cpu(problem)
     assert_equal(result.iterations, UInt32(1))
     assert_true(result.particles[0] != 0.0 or result.particles[1] != 0.0)
     assert_true(result.chi2 < initial.chi2)
@@ -89,7 +89,7 @@ def test_initialization_is_not_counted_as_trip_iteration() raises:
 
 def test_initialization_prefers_packed_host_direction() raises:
     var problem = build_problem()
-    problem.settings.flags |= FDCB_FLAG_INITIALIZE
+    problem.settings.flags |= OPTIMIZER_FLAG_INITIALIZE
     problem.initial_direction[0] = 7.0
     problem.initial_direction[1] = 11.0
     var direction = initial_direction(problem, [3.0, 5.0])
@@ -101,8 +101,8 @@ def test_fletcher_reeves_preserves_trip_field_weighting() raises:
     var problem = build_problem()
     problem.field_count = UInt32(2)
     problem.field_slices = [
-        FDCBFieldSliceV1(0, 0, 0, 1, 0, 0.0),
-        FDCBFieldSliceV1(1, 0, 1, 1, 0, 0.0),
+        FieldSlice(0, 0, 0, 1, 0, 0.0),
+        FieldSlice(1, 0, 1, 1, 0, 0.0),
     ]
     var direction = fletcher_reeves_direction(
         problem, [2.0, 3.0], [1.0, 2.0], [1.0, 1.0]

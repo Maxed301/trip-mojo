@@ -1,8 +1,8 @@
-# 4D robust FDCB
+# 4D robust optimizer
 
 TRiP owns CT states, deformation, masks, VOIs, WET, field setup and RST output.
 It appends every selected state's optimization voxels to one flat table before
-FDCB starts. Mojo therefore needs no motion-state branch: each flat voxel owns
+optimizer starts. Mojo therefore needs no motion-state branch: each flat voxel owns
 the same robust-scenario range used by the 3D layout.
 
 ```text
@@ -18,8 +18,10 @@ the geometry and exact double-Gaussian parameters instead, then reconstructs
 each coefficient in the optimizer with the same Float64 expression used during
 matrix construction. This selection is automatic and has no environment or
 command-line flag. Distinct robust scenario matrices are retained. TRiP
-releases completed source matrices while packing so the nested and packed
-forms are not both fully resident.
+releases completed source matrices while packing, and Mojo releases
+matrix-build host buffers as soon as TRiP imports their values. Once
+accelerator setup is complete, Mojo also releases packed voxel, scenario, state
+and slice arrays that the iteration loop no longer uses.
 
 ## Canonical case
 
@@ -29,7 +31,7 @@ The reference exec is:
 ${ROOT}/TRIP_DATA/P101_4Dopt/exec/P101_ITV_full4DITVplan.lustre.exec
 ```
 
-It uses ten CT states, nine robust scenarios, biological low-dose FDCB/MSDB and
+It uses ten CT states, nine robust scenarios, biological low-dose optimization with MSDB and
 deterministic `complexminp`. The packed problem contains 251,790 voxels and
 5,546,317,539 coefficients. Reference and Mojo runs use the same exec, RNG
 state, Float64 arithmetic and stopping criteria.

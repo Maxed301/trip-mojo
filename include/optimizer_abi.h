@@ -1,5 +1,5 @@
-#ifndef TRIP_MOJO_FDCB_ABI_V1_H
-#define TRIP_MOJO_FDCB_ABI_V1_H
+#ifndef TRIP_MOJO_OPTIMIZER_ABI_H
+#define TRIP_MOJO_OPTIMIZER_ABI_H
 
 #include <stdint.h>
 
@@ -8,30 +8,20 @@ extern "C" {
 #endif
 
 enum {
-    FDCB_ABI_VERSION_V1 = 1,
-    FDCB_FLAG_ROBUST_INCLUDE_DMAX = 1u << 0,
-    FDCB_FLAG_BIOLOGICAL = 1u << 1,
-    FDCB_FLAG_INITIALIZE = 1u << 2,
-    FDCB_FLAG_DEVICE_BOOTSTRAP = 1u << 3,
-    FDCB_PRECISION_REFERENCE = 1,
-    FDCB_PRECISION_MIXED32 = 2,
-    FDCB_MIN_PARTICLE_DISABLED = 0,
-    FDCB_MIN_PARTICLE_SIMPLE = 1,
-    FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG = 2,
-    FDCB_OPTIMIZER_FDCB = 1,
-    FDCB_DOSE_MS = 1,
-    FDCB_DOSE_MSDB = 2,
-    FDCB_BIOLOGY_NONE = 0,
-    FDCB_BIOLOGY_LOW_DOSE = 1,
-    FDCB_RESULT_FINAL_MIN_PARTICLES_APPLIED = 1u << 0
+    MOJO_OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX = 1u << 0,
+    MOJO_OPTIMIZER_FLAG_BIOLOGICAL = 1u << 1,
+    MOJO_OPTIMIZER_FLAG_INITIALIZE = 1u << 2,
+    MOJO_OPTIMIZER_FLAG_DEVICE_BOOTSTRAP = 1u << 3,
+    MOJO_MINIMUM_PARTICLE_DISABLED = 0,
+    MOJO_MINIMUM_PARTICLE_SIMPLE = 1,
+    MOJO_MINIMUM_PARTICLE_COMPLEX_HOST_RNG = 2,
+    MOJO_DOSE_ALGORITHM_MS = 1,
+    MOJO_DOSE_ALGORITHM_MSDB = 2,
+    MOJO_OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED = 1u << 0
 };
 
-/* Production CPU and accelerator entry points accept REFERENCE only.
- * FDCB_PRECISION_MIXED32 remains reserved for ABI compatibility.
- */
-
 /* Field slices are grouped by contiguous field_index values starting at zero.
- * Their point ranges partition every point exactly once. FDCBSliceV1 indices
+ * Their point ranges partition every point exactly once. MojoDoseMatrixSlice indices
  * select this table; coefficient_point_indices are UInt16-local to that range.
  */
 typedef struct {
@@ -41,7 +31,7 @@ typedef struct {
     uint32_t point_count;
     uint32_t raster_stride; /* Raster row width for host complexminp neighbors. */
     double minimum_particles;
-} FDCBFieldSliceV1;
+} MojoFieldSlice;
 
 typedef struct {
     double prescribed_dose;
@@ -60,13 +50,13 @@ typedef struct {
     int32_t initial_min_scenario;
     int32_t initial_max_scenario;
     uint64_t scenario_offset;
-} FDCBVoxelV1;
+} MojoOptimizationVoxel;
 
 typedef struct {
     uint64_t slice_offset;
     uint32_t slice_count;
     uint32_t reserved;
-} FDCBVoxelScenarioV1;
+} MojoRobustScenario;
 
 typedef struct {
     uint32_t field_slice_index;
@@ -78,25 +68,19 @@ typedef struct {
     double sqrt_beta_coefficient;
     double let_mix_coefficient;
     double let_bar_coefficient;
-} FDCBSliceV1;
+} MojoDoseMatrixSlice;
 
 typedef struct {
     double dose_minor;
     double alpha_minor;
     double sqrt_beta_minor;
     double let_mix_minor;
-} FDCBScenarioStateV1;
+} MojoScenarioState;
 
 typedef struct {
-    uint32_t version;
     uint32_t flags;
-    uint32_t precision_mode;
     uint32_t minimum_particle_policy;
-    uint32_t optimizer_algorithm;
     uint32_t dose_algorithm;
-    uint32_t biology_model;
-    uint32_t max_threads;
-    uint32_t reserved;
     uint64_t rng_seed;
     uint32_t rng_front;
     uint32_t rng_rear;
@@ -125,39 +109,39 @@ typedef struct {
     uint64_t voxel_scenario_count;
     uint64_t slice_count;
     uint64_t coefficient_count;
-    const FDCBFieldSliceV1 *field_slices;
+    const MojoFieldSlice *field_slices;
     const uint32_t *rng_state;
     const double *particles;
     const double *initial_direction;
     const double *initial_gradient;
     const uint8_t *point_active;
-    const FDCBVoxelV1 *voxels;
-    const FDCBVoxelScenarioV1 *voxel_scenarios;
-    const FDCBScenarioStateV1 *scenario_states;
-    const FDCBSliceV1 *slices;
+    const MojoOptimizationVoxel *voxels;
+    const MojoRobustScenario *voxel_scenarios;
+    const MojoScenarioState *scenario_states;
+    const MojoDoseMatrixSlice *slices;
     const uint16_t *coefficient_point_indices;
     const double *coefficients;
-} FDCBProblemViewV1;
+} MojoOptimizationProblem;
 
 /* Mojo owns these pre-sized contiguous arrays. C fills every element exactly
  * once before invoking a storage optimizer entry point. */
 typedef struct {
-    FDCBFieldSliceV1 *field_slices;
+    MojoFieldSlice *field_slices;
     uint32_t *rng_state;
     double *particles;
     double *initial_direction;
     double *initial_gradient;
     uint8_t *point_active;
-    FDCBVoxelV1 *voxels;
-    FDCBVoxelScenarioV1 *voxel_scenarios;
-    FDCBScenarioStateV1 *scenario_states;
-    FDCBSliceV1 *slices;
+    MojoOptimizationVoxel *voxels;
+    MojoRobustScenario *voxel_scenarios;
+    MojoScenarioState *scenario_states;
+    MojoDoseMatrixSlice *slices;
     uint16_t *coefficient_point_indices;
     double *coefficients;
-} FDCBWritableArraysV1;
+} MojoProblemArrays;
 
-typedef struct FDCBProblemStorageV1 FDCBProblemStorageV1;
-struct FDCBMatrixStorageV1;
+typedef struct MojoProblemHandle MojoProblemHandle;
+struct MojoDeviceMatrix;
 
 typedef struct {
     double chi2;
@@ -172,114 +156,114 @@ typedef struct {
     uint64_t random_draws;
     uint32_t stop_reason;
     uint32_t flags;
-} FDCBResultV1;
+} MojoOptimizationResult;
 
 typedef struct {
     double chi2;
     double dose_p_weighted_avg2;
     double gradient_norm;
     double residual_percent;
-} FDCBEvaluationResultV1;
+} MojoEvaluationResult;
 
-int32_t trip_fdcb_storage_create_v1(
-    const FDCBProblemViewV1 *problem_template,
-    FDCBProblemStorageV1 **storage_out,
-    FDCBWritableArraysV1 *arrays_out
+int32_t trip_optimizer_create_problem(
+    const MojoOptimizationProblem *problem_template,
+    MojoProblemHandle **storage_out,
+    MojoProblemArrays *arrays_out
 );
 
-int32_t trip_fdcb_matrix_problem_storage_create_v1(
-    const FDCBProblemViewV1 *problem_template,
-    struct FDCBMatrixStorageV1 *matrix_storage,
-    FDCBProblemStorageV1 **storage_out,
-    FDCBWritableArraysV1 *arrays_out
+int32_t trip_optimizer_create_problem_with_matrix(
+    const MojoOptimizationProblem *problem_template,
+    struct MojoDeviceMatrix *matrix_storage,
+    MojoProblemHandle **storage_out,
+    MojoProblemArrays *arrays_out
 );
 
-int32_t trip_fdcb_matrix_problem_storage_create_accelerators_v1(
-    const FDCBProblemViewV1 *problem_template,
-    struct FDCBMatrixStorageV1 *const *matrix_storages,
+int32_t trip_optimizer_create_problem_with_matrix_shards(
+    const MojoOptimizationProblem *problem_template,
+    struct MojoDeviceMatrix *const *matrix_storages,
     const uint64_t *matrix_entry_counts,
     const uint64_t *voxel_offsets,
     const uint64_t *voxel_counts,
     uint32_t device_count,
-    FDCBProblemStorageV1 **storage_out,
-    FDCBWritableArraysV1 *arrays_out
+    MojoProblemHandle **storage_out,
+    MojoProblemArrays *arrays_out
 );
 
-int32_t trip_fdcb_storage_destroy_v1(FDCBProblemStorageV1 *storage);
+int32_t trip_optimizer_destroy_problem(MojoProblemHandle *storage);
 
-int32_t trip_fdcb_matrix_problem_storage_destroy_v1(
-    FDCBProblemStorageV1 *storage
+int32_t trip_optimizer_destroy_problem_with_matrix(
+    MojoProblemHandle *storage
 );
 
-int32_t trip_fdcb_matrix_problem_storage_destroy_accelerators_v1(
-    FDCBProblemStorageV1 *storage
+int32_t trip_optimizer_destroy_problem_with_matrix_shards(
+    MojoProblemHandle *storage
 );
 
-int32_t trip_fdcb_storage_evaluate_v1(
-    FDCBProblemStorageV1 *storage,
+int32_t trip_optimizer_evaluate_problem(
+    MojoProblemHandle *storage,
     double *gradient_out,
     uint64_t gradient_out_count,
-    FDCBEvaluationResultV1 *result_out
+    MojoEvaluationResult *result_out
 );
 
-int32_t trip_fdcb_storage_optimize_v1(
-    FDCBProblemStorageV1 *storage,
+int32_t trip_optimizer_optimize_problem(
+    MojoProblemHandle *storage,
     double *particles_out,
     uint64_t particles_out_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
 /* Returns -3 when the library was built without an available accelerator. */
-int32_t trip_fdcb_storage_optimize_accelerator_v1(
-    FDCBProblemStorageV1 *storage,
+int32_t trip_optimizer_optimize_problem_on_device(
+    MojoProblemHandle *storage,
     double *particles_out,
     uint64_t particles_out_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
-/* V1 accepts two or three devices and shards packed voxels. */
-int32_t trip_fdcb_storage_optimize_accelerators_v1(
-    FDCBProblemStorageV1 *storage,
+/*  accepts two or three devices and shards packed voxels. */
+int32_t trip_optimizer_optimize_problem_on_devices(
+    MojoProblemHandle *storage,
     double *particles_out,
     uint64_t particles_out_count,
     uint32_t device_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
-int32_t trip_fdcb_matrix_problem_optimize_accelerator_v1(
-    FDCBProblemStorageV1 *storage,
+int32_t trip_optimizer_optimize_matrix_problem(
+    MojoProblemHandle *storage,
     double *particles_out,
     uint64_t particles_out_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
-int32_t trip_fdcb_matrix_problem_optimize_accelerators_v1(
-    FDCBProblemStorageV1 *storage,
+int32_t trip_optimizer_optimize_matrix_problem_shards(
+    MojoProblemHandle *storage,
     double *particles_out,
     uint64_t particles_out_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
-int32_t trip_fdcb_evaluate_v1(
-    const FDCBProblemViewV1 *problem,
+int32_t trip_optimizer_evaluate_view(
+    const MojoOptimizationProblem *problem,
     double *gradient_out,
     uint64_t gradient_out_count,
-    FDCBEvaluationResultV1 *result_out
+    MojoEvaluationResult *result_out
 );
 
-int32_t trip_fdcb_optimize_v1(
-    const FDCBProblemViewV1 *problem,
+int32_t trip_optimizer_optimize_view(
+    const MojoOptimizationProblem *problem,
     double *particles_out,
     uint64_t particles_out_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
 /* Returns -3 when the library was built without an available accelerator. */
-int32_t trip_fdcb_optimize_accelerator_v1(
-    const FDCBProblemViewV1 *problem,
+int32_t trip_optimizer_optimize_view_on_device(
+    const MojoOptimizationProblem *problem,
     double *particles_out,
     uint64_t particles_out_count,
-    FDCBResultV1 *result_out
+    MojoOptimizationResult *result_out
 );
 
 #ifdef __cplusplus

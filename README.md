@@ -1,6 +1,6 @@
 # trip-mojo
 
-Portable Mojo backends for TRiP's FDCB optimizer and prepared clinical-dose
+Portable Mojo backends for TRiP's optimizer and prepared clinical-dose
 calculation. This is not a TRiP rewrite: TRiP keeps parsing, geometry, VOIs,
 WET/setup, dose storage and output.
 
@@ -12,8 +12,8 @@ canonical local and cluster paths.
 
 | Path | Current validation |
 |---|---|
-| CPU FDCB | P101 3D robust biological plan stops at iteration 271 and writes byte-identical RSTs. |
-| NVIDIA FDCB | P101 ten-state, nine-scenario 4D robust plan stops at iteration 120 and writes byte-identical RSTs on H200. |
+| CPU optimizer | P101 3D robust biological plan stops at iteration 271 and writes byte-identical RSTs. |
+| NVIDIA optimizer | P101 ten-state, nine-scenario 4D robust plan stops at iteration 120 and writes byte-identical RSTs on H200. |
 | NVIDIA multi-GPU | Direct coefficient-balanced shards remain byte-identical; oversized shards automatically retain topology and reconstruct exact Float64 coefficients. |
 | CPU dose | Full static P101 physical/biological cubes match within one/two Float32 output ULPs. |
 | NVIDIA dose | Same complete static case and support validated on H200. |
@@ -41,24 +41,24 @@ uv sync --frozen
 MOJO=.venv/bin/mojo
 mkdir -p build
 $MOJO build -I . -O3 -g1 --emit shared-lib \
-  fdcb_abi.mojo -Xlinker -lm -o build/libtrip_fdcb_mojo.so
+  trip_abi.mojo -Xlinker -lm -o build/libtrip_mojo.so
 
 # CPU tests run without an accelerator:
-for test in test_fdcb_problem test_fdcb_cpu test_fdcb_optimize \
-  test_fdcb_min_particles; do
+for test in test_optimization_problem test_cpu_backend test_optimizer \
+  test_minimum_particles; do
   $MOJO run -I . -O3 tests/$test.mojo
 done
 # Requires one visible accelerator:
-$MOJO run -I . -O3 tests/test_fdcb_accelerator.mojo
+$MOJO run -I . -O3 tests/test_device_backend.mojo
 # Require two and three visible accelerators, respectively:
-$MOJO run -I . -O3 tests/test_fdcb_two_accelerators.mojo
-$MOJO run -I . -O3 tests/test_fdcb_three_accelerators.mojo
+$MOJO run -I . -O3 tests/test_two_devices.mojo
+$MOJO run -I . -O3 tests/test_three_devices.mojo
 
-cc -O2 -Iinclude tests/ffi/test_fdcb_abi.c -Lbuild -ltrip_fdcb_mojo \
-  -Wl,-rpath,'$ORIGIN' -o build/test_fdcb_abi
+cc -O2 -Iinclude tests/ffi/test_optimizer_abi.c -Lbuild -ltrip_mojo \
+  -Wl,-rpath,'$ORIGIN' -o build/test_optimizer_abi
 cc -O2 -Iinclude tests/ffi/test_clinical_dose_abi.c -Lbuild \
-  -ltrip_fdcb_mojo -Wl,-rpath,'$ORIGIN' -o build/test_clinical_dose_abi
-build/test_fdcb_abi && build/test_clinical_dose_abi
+  -ltrip_mojo -Wl,-rpath,'$ORIGIN' -o build/test_clinical_dose_abi
+build/test_optimizer_abi && build/test_clinical_dose_abi
 ```
 
 On the cluster, a prebuilt Mojo-linked TRiP plan is submitted with no backend feature
@@ -71,7 +71,7 @@ flags:
 `--gpus` defaults to one. `submit.sh` is the only job entry point; plans select
 the TRiP workload and Slurm's visible devices select the accelerator count.
 The requested devices are discovered from Slurm's standard visibility. The
-Mojo-linked executable always uses the Mojo FDCB optimizer and clinical-dose
+Mojo-linked executable always uses the Mojo optimizer and clinical-dose
 backend. NVIDIA uses direct accelerator matrix storage, including per-device
 matrix ownership for multi-GPU jobs. AMD retains TRiP's canonical CPU-built
 Float64 matrix. Native comparisons require a separate unpatched `trip_temp`
@@ -115,7 +115,7 @@ table term instead of reproducing that stale-state behavior.
 
 ## Optimizer boundary
 
-`fdcb_problem.mojo` owns the backend-neutral `FDCBProblemV1`. Its arrays are
+`optimization_problem.mojo` owns the backend-neutral `OptimizationProblem`. Its arrays are
 flat and contiguous, and boundary indices have fixed widths:
 
 - field slices partition the global particle vector;
@@ -127,13 +127,15 @@ The layout is identical for 3D and 4D. TRiP flattens selected motion-state
 voxels before packing; robust scenario remains the inner numeric axis. Motion
 loading, deformation and state-aware output stay in TRiP.
 
-`fdcb_packing.mojo` converts convenient native test models into this numeric
+`problem_packing.mojo` converts convenient native test models into this numeric
 layout. Production C integration avoids another full copy: Mojo allocates the
 arrays, returns temporary writable pointers, and owns them until storage
 destruction. The direct matrix boundary keeps UInt16 topology on the
 accelerator and transfers only compact metadata into the optimizer. Shards up
-to ten billion entries also retain Float64 coefficients; larger shards retain
-geometry and reconstruct the same double-Gaussian coefficient on demand.
+to ten billion entries retain every Float64 coefficient; larger shards retain
+geometry and reconstruct the same double-Gaussian coefficient on demand. After
+accelerator setup, packed voxel/scenario/slice arrays that no iteration kernel
+uses are released from host memory.
 
 The CPU and accelerator evaluators share the host iteration controller,
 stopping rules, Fletcher-Reeves updates, backtracking and host-side

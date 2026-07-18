@@ -1,4 +1,4 @@
-"""Backend-neutral, owned numeric boundary for FDCB optimization.
+"""Backend-neutral, owned numeric boundary for robust fluence optimization.
 
 All variable-length storage is held in flat contiguous Lists with fixed-width
 indices. Native callers own those Lists directly. C callers may instead ask
@@ -10,23 +10,20 @@ from std.algorithm import parallelize
 from std.math import sqrt
 
 
-comptime FDCB_PROBLEM_VERSION_V1 = UInt32(1)
-comptime FDCB_PRECISION_REFERENCE = UInt32(1)
-comptime FDCB_PRECISION_MIXED32 = UInt32(2)
-comptime FDCB_MIN_PARTICLE_DISABLED = UInt32(0)
-comptime FDCB_MIN_PARTICLE_SIMPLE = UInt32(1)
-comptime FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG = UInt32(2)
-comptime FDCB_FLAG_ROBUST_INCLUDE_DMAX = UInt32(1)
-comptime FDCB_FLAG_BIOLOGICAL = UInt32(2)
-comptime FDCB_FLAG_INITIALIZE = UInt32(4)
-comptime FDCB_FLAG_DEVICE_BOOTSTRAP = UInt32(8)
-comptime FDCB_MEV_TO_GY = 1.602189e-8
-comptime FDCB_FLOAT64_EPSILON = 2.220446049250313e-16
-comptime FDCB_PHYSICAL_CPU_THREADS = 12
+comptime MINIMUM_PARTICLE_DISABLED = UInt32(0)
+comptime MINIMUM_PARTICLE_SIMPLE = UInt32(1)
+comptime MINIMUM_PARTICLE_COMPLEX_HOST_RNG = UInt32(2)
+comptime OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX = UInt32(1)
+comptime OPTIMIZER_FLAG_BIOLOGICAL = UInt32(2)
+comptime OPTIMIZER_FLAG_INITIALIZE = UInt32(4)
+comptime OPTIMIZER_FLAG_DEVICE_BOOTSTRAP = UInt32(8)
+comptime MEV_TO_GY = 1.602189e-8
+comptime FLOAT64_EPSILON = 2.220446049250313e-16
+comptime PHYSICAL_CPU_THREADS = 12
 
 
 @fieldwise_init
-struct FDCBMinimumParticlePolicyV1(Copyable, Movable):
+struct MinimumParticlePolicy(Copyable, Movable):
     """Host policy; numeric backends never advance minimum-particle RNG state.
     """
 
@@ -36,15 +33,15 @@ struct FDCBMinimumParticlePolicyV1(Copyable, Movable):
     var rng_rear: UInt32
 
     @staticmethod
-    def disabled() -> FDCBMinimumParticlePolicyV1:
-        return FDCBMinimumParticlePolicyV1(
-            FDCB_MIN_PARTICLE_DISABLED, UInt64(0), UInt32(3), UInt32(0)
+    def disabled() -> MinimumParticlePolicy:
+        return MinimumParticlePolicy(
+            MINIMUM_PARTICLE_DISABLED, UInt64(0), UInt32(3), UInt32(0)
         )
 
     @staticmethod
-    def complex_host_rng(seed: UInt64) -> FDCBMinimumParticlePolicyV1:
-        return FDCBMinimumParticlePolicyV1(
-            FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG,
+    def complex_host_rng(seed: UInt64) -> MinimumParticlePolicy:
+        return MinimumParticlePolicy(
+            MINIMUM_PARTICLE_COMPLEX_HOST_RNG,
             seed,
             UInt32(3),
             UInt32(0),
@@ -52,9 +49,8 @@ struct FDCBMinimumParticlePolicyV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBSettingsV1(Copyable, Movable):
+struct OptimizerSettings(Copyable, Movable):
     var flags: UInt32
-    var precision_mode: UInt32
     var max_iterations: UInt32
     var grace_iterations: UInt32
     var avoidance_voxel_count: UInt32
@@ -73,10 +69,9 @@ struct FDCBSettingsV1(Copyable, Movable):
     var update_elapsed: Float64
 
     @staticmethod
-    def reference_defaults() -> FDCBSettingsV1:
-        return FDCBSettingsV1(
+    def reference_defaults() -> OptimizerSettings:
+        return OptimizerSettings(
             UInt32(0),
-            FDCB_PRECISION_REFERENCE,
             UInt32(0),
             UInt32(0),
             UInt32(0),
@@ -97,7 +92,7 @@ struct FDCBSettingsV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBFieldSliceV1(Copyable, Movable):
+struct FieldSlice(Copyable, Movable):
     var field_index: UInt32
     var beam_index: UInt32
     var point_offset: UInt64
@@ -107,7 +102,7 @@ struct FDCBFieldSliceV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBVoxelV1(Copyable, Movable):
+struct OptimizationVoxel(Copyable, Movable):
     var prescribed_dose: Float64
     var dose_weight: Float64
     var dose_divisor: Float64
@@ -127,13 +122,13 @@ struct FDCBVoxelV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBVoxelScenarioV1(Copyable, Movable):
+struct RobustScenario(Copyable, Movable):
     var slice_offset: UInt64
     var slice_count: UInt32
 
 
 @fieldwise_init
-struct FDCBSliceV1(Copyable, Movable):
+struct DoseMatrixSlice(Copyable, Movable):
     var field_slice_index: UInt32
     var matrix_slice_index: UInt32
     var coefficient_offset: UInt64
@@ -146,7 +141,7 @@ struct FDCBSliceV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBScenarioStateV1(Copyable, Movable):
+struct ScenarioState(Copyable, Movable):
     var dose_minor: Float64
     var alpha_minor: Float64
     var sqrt_beta_minor: Float64
@@ -154,95 +149,92 @@ struct FDCBScenarioStateV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBProblemV1(Copyable, Movable):
+struct OptimizationProblem(Copyable, Movable):
     """Owned packed problem. Backends borrow these arrays for one optimization.
 
     CT motion states are deliberately not a numeric axis here. TRiP appends
     every selected state's optimization voxels to `voxels`; each flattened
     voxel then owns the same robust-scenario range as a 3D voxel. This keeps
     4D setup/deformation in the control plane while CPU and accelerator
-    backends run exactly the same sparse FDCB kernels.
+    backends run exactly the same sparse optimizer kernels.
     """
 
-    var version: UInt32
-    var settings: FDCBSettingsV1
-    var minimum_particle_policy: FDCBMinimumParticlePolicyV1
+    var settings: OptimizerSettings
+    var minimum_particle_policy: MinimumParticlePolicy
     var host_rng_state: List[UInt32]
     var field_count: UInt32
     var scenario_count: UInt32
-    var field_slices: List[FDCBFieldSliceV1]
+    var field_slices: List[FieldSlice]
     var particles: List[Float64]
     var initial_direction: List[Float64]
     var initial_gradient: List[Float64]
     var point_active: List[UInt8]
-    var voxels: List[FDCBVoxelV1]
-    var voxel_scenarios: List[FDCBVoxelScenarioV1]
-    var scenario_states: List[FDCBScenarioStateV1]
-    var slices: List[FDCBSliceV1]
+    var voxels: List[OptimizationVoxel]
+    var voxel_scenarios: List[RobustScenario]
+    var scenario_states: List[ScenarioState]
+    var slices: List[DoseMatrixSlice]
     var coefficient_point_indices: List[UInt16]
     var coefficients: List[Float64]
 
     def validate(
         self,
-        required_precision: UInt32 = FDCB_PRECISION_REFERENCE,
         external_coefficient_count: UInt64 = UInt64.MAX,
     ) raises:
-        if self.version != FDCB_PROBLEM_VERSION_V1:
-            raise Error("unsupported FDCB packed problem version")
-        if (
-            self.settings.precision_mode != FDCB_PRECISION_REFERENCE
-            and self.settings.precision_mode != FDCB_PRECISION_MIXED32
-        ):
-            raise Error("unsupported FDCB precision mode")
-        if self.settings.precision_mode != required_precision:
-            raise Error("FDCB precision mode is incompatible with backend")
         if (
             self.settings.fractions <= 0.0
             or self.settings.overdose_weight <= 0.0
         ):
-            raise Error("FDCB fractions and overdose weight must be positive")
+            raise Error(
+                "optimizer fractions and overdose weight must be positive"
+            )
         if self.field_count == UInt32(0):
-            raise Error("FDCB problem requires at least one field")
+            raise Error("optimizer problem requires at least one field")
         if self.scenario_count == UInt32(0):
-            raise Error("FDCB problem requires at least one scenario")
+            raise Error("optimizer problem requires at least one scenario")
         if len(self.field_slices) == 0 or len(self.voxels) == 0:
-            raise Error("FDCB problem requires field slices and voxels")
+            raise Error("optimizer problem requires field slices and voxels")
         if (
             len(self.particles) != len(self.initial_direction)
             or len(self.particles) != len(self.initial_gradient)
             or len(self.particles) != len(self.point_active)
         ):
-            raise Error("FDCB point arrays have inconsistent lengths")
+            raise Error("optimizer point arrays have inconsistent lengths")
         if self.settings.active_point_count > UInt32(len(self.particles)):
-            raise Error("FDCB active point count exceeds the point arrays")
+            raise Error("optimizer active point count exceeds the point arrays")
         var coefficients_are_external = external_coefficient_count != UInt64.MAX
         if not coefficients_are_external and len(
             self.coefficient_point_indices
         ) != len(self.coefficients):
-            raise Error("FDCB coefficient arrays have inconsistent lengths")
+            raise Error(
+                "optimizer coefficient arrays have inconsistent lengths"
+            )
         var available_coefficients = UInt64(len(self.coefficients))
         if coefficients_are_external:
             available_coefficients = external_coefficient_count
         if len(self.voxel_scenarios) != len(self.voxels) * Int(
             self.scenario_count
         ):
-            raise Error("FDCB voxel/scenario table has inconsistent length")
+            raise Error(
+                "optimizer voxel/scenario table has inconsistent length"
+            )
         if len(self.scenario_states) != len(self.voxel_scenarios):
-            raise Error("FDCB scenario state table has inconsistent length")
+            raise Error(
+                "optimizer scenario state table has inconsistent length"
+            )
         if (
-            self.minimum_particle_policy.kind != FDCB_MIN_PARTICLE_DISABLED
-            and self.minimum_particle_policy.kind != FDCB_MIN_PARTICLE_SIMPLE
+            self.minimum_particle_policy.kind != MINIMUM_PARTICLE_DISABLED
+            and self.minimum_particle_policy.kind != MINIMUM_PARTICLE_SIMPLE
             and self.minimum_particle_policy.kind
-            != FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+            != MINIMUM_PARTICLE_COMPLEX_HOST_RNG
         ):
             raise Error("unknown minimum-particle policy")
         if len(self.host_rng_state) != 0 and len(self.host_rng_state) != 31:
-            raise Error("FDCB host RNG state must contain 31 words")
+            raise Error("optimizer host RNG state must contain 31 words")
         if len(self.host_rng_state) == 31 and (
             self.minimum_particle_policy.rng_front >= UInt32(31)
             or self.minimum_particle_policy.rng_rear >= UInt32(31)
         ):
-            raise Error("FDCB host RNG indices are out of bounds")
+            raise Error("optimizer host RNG indices are out of bounds")
 
         var expected_point_offset = UInt64(0)
         var expected_field_index = UInt32(0)
@@ -261,7 +253,7 @@ struct FDCBProblemV1(Copyable, Movable):
                 raise Error("field slice exceeds UInt16 local point indexing")
             if (
                 self.minimum_particle_policy.kind
-                == FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+                == MINIMUM_PARTICLE_COMPLEX_HOST_RNG
                 and field_slice.minimum_particles > 0.0
                 and field_slice.raster_stride == UInt32(0)
             ):
@@ -287,14 +279,14 @@ struct FDCBProblemV1(Copyable, Movable):
             ):
                 raise Error("voxel initial scenario index is out of bounds")
             if (
-                (self.settings.flags & FDCB_FLAG_BIOLOGICAL) != UInt32(0)
+                (self.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0)
                 and voxel.prescribed_dose != 0.0
                 and voxel.rbe_alpha == 0.0
                 and voxel.rbe_beta == 0.0
             ):
                 raise Error("biological voxel has zero RBE alpha and beta")
             if (
-                (self.settings.flags & FDCB_FLAG_BIOLOGICAL) != UInt32(0)
+                (self.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0)
                 and voxel.prescribed_dose != 0.0
                 and voxel.rbe_slope_max == 0.0
             ):
@@ -323,13 +315,15 @@ struct FDCBProblemV1(Copyable, Movable):
         for slice_index in range(len(self.slices)):
             var packed_slice = self.slices[slice_index].copy()
             if Int(packed_slice.field_slice_index) >= len(self.field_slices):
-                raise Error("FDCB slice has invalid field-slice index")
+                raise Error("optimizer slice has invalid field-slice index")
             if (
                 packed_slice.coefficient_offset
                 + UInt64(packed_slice.coefficient_count)
                 > available_coefficients
             ):
-                raise Error("FDCB slice coefficient range is out of bounds")
+                raise Error(
+                    "optimizer slice coefficient range is out of bounds"
+                )
             var field_slice = self.field_slices[
                 Int(packed_slice.field_slice_index)
             ].copy()
@@ -349,7 +343,7 @@ struct FDCBProblemV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBPackedEvaluation(Copyable, Movable):
+struct ObjectiveEvaluation(Copyable, Movable):
     var dose_by_voxel_scenario: List[Float64]
     var dose_min: List[Float64]
     var dose_max: List[Float64]
@@ -361,19 +355,21 @@ struct FDCBPackedEvaluation(Copyable, Movable):
     var gradient_norm: Float64
 
 
-def fdcb_packed_forward_dose(
-    problem: FDCBProblemV1, particles: List[Float64]
+def compute_forward_dose(
+    problem: OptimizationProblem, particles: List[Float64]
 ) raises -> List[Float64]:
     problem.validate()
-    return fdcb_packed_forward_dose_validated(problem, particles)
+    return compute_forward_dose_validated(problem, particles)
 
 
-def fdcb_packed_forward_dose_validated(
-    problem: FDCBProblemV1, particles: List[Float64]
+def compute_forward_dose_validated(
+    problem: OptimizationProblem, particles: List[Float64]
 ) raises -> List[Float64]:
-    comptime assert FDCB_PHYSICAL_CPU_THREADS > 0
+    comptime assert PHYSICAL_CPU_THREADS > 0
     if len(particles) != len(problem.particles):
-        raise Error("particle vector length does not match packed FDCB problem")
+        raise Error(
+            "particle vector length does not match packed optimization problem"
+        )
     var dose = List[Float64]()
     dose.resize(len(problem.voxel_scenarios), 0.0)
     var particle_ptr = Span(particles).unsafe_ptr()
@@ -407,25 +403,23 @@ def fdcb_packed_forward_dose_validated(
                 )
             total += slice_dot * Float64(packed_slice.dose_coefficient)
         var voxel_index = vs_index // Int(problem.scenario_count)
-        dose[vs_index] = (
-            total * FDCB_MEV_TO_GY + voxel_ptr[voxel_index].initial_dose
-        )
+        dose[vs_index] = total * MEV_TO_GY + voxel_ptr[voxel_index].initial_dose
 
-    parallelize[compute_dose](len(dose), FDCB_PHYSICAL_CPU_THREADS)
+    parallelize[compute_dose](len(dose), PHYSICAL_CPU_THREADS)
     return dose^
 
 
-def evaluate_packed_physical_fdcb(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> FDCBPackedEvaluation:
+def evaluate_physical_objective(
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> ObjectiveEvaluation:
     problem.validate()
-    return evaluate_validated_packed_physical_fdcb(problem, particles)
+    return evaluate_physical_objective_validated(problem, particles)
 
 
-def evaluate_validated_packed_physical_fdcb(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> FDCBPackedEvaluation:
-    var scenario_dose = fdcb_packed_forward_dose_validated(problem, particles)
+def evaluate_physical_objective_validated(
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> ObjectiveEvaluation:
+    var scenario_dose = compute_forward_dose_validated(problem, particles)
     var dose_min = List[Float64]()
     var dose_max = List[Float64]()
     var min_scenario = List[Int32]()
@@ -474,9 +468,9 @@ def evaluate_validated_packed_physical_fdcb(
         weighted += (weight * voxel.prescribed_dose) * (
             weight * voxel.prescribed_dose
         )
-        if (problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX) != UInt32(
-            0
-        ) and voxel.prescribed_dose > 0.0:
+        if (
+            problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
+        ) != UInt32(0) and voxel.prescribed_dose > 0.0:
             var max_weight = voxel.maximum_dose_weight / voxel.dose_divisor
             var max_residual = prescribed - dmax
             chi2 += (max_residual * max_weight) * (max_residual * max_weight)
@@ -485,14 +479,12 @@ def evaluate_validated_packed_physical_fdcb(
             )
     var point_count = len(problem.particles)
     var thread_gradients = List[Float64]()
-    thread_gradients.resize(FDCB_PHYSICAL_CPU_THREADS * point_count, 0.0)
+    thread_gradients.resize(PHYSICAL_CPU_THREADS * point_count, 0.0)
 
     @parameter
     def scatter_worker(worker: Int):
-        var start = worker * len(problem.voxels) // FDCB_PHYSICAL_CPU_THREADS
-        var end = (
-            (worker + 1) * len(problem.voxels) // FDCB_PHYSICAL_CPU_THREADS
-        )
+        var start = worker * len(problem.voxels) // PHYSICAL_CPU_THREADS
+        var end = (worker + 1) * len(problem.voxels) // PHYSICAL_CPU_THREADS
         var output_base = worker * point_count
         for voxel_index in range(start, end):
             var voxel = problem.voxels[voxel_index].copy()
@@ -515,7 +507,7 @@ def evaluate_validated_packed_physical_fdcb(
                 output_base,
             )
             if (
-                problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX
+                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
             ) != UInt32(0) and voxel.prescribed_dose > 0.0:
                 scatter_packed_physical_gradient(
                     problem,
@@ -529,10 +521,8 @@ def evaluate_validated_packed_physical_fdcb(
                     output_base,
                 )
 
-    parallelize[scatter_worker](
-        FDCB_PHYSICAL_CPU_THREADS, FDCB_PHYSICAL_CPU_THREADS
-    )
-    for worker in range(FDCB_PHYSICAL_CPU_THREADS):
+    parallelize[scatter_worker](PHYSICAL_CPU_THREADS, PHYSICAL_CPU_THREADS)
+    for worker in range(PHYSICAL_CPU_THREADS):
         var base = worker * point_count
         for point in range(point_count):
             gradient[point] += thread_gradients[base + point]
@@ -540,7 +530,7 @@ def evaluate_validated_packed_physical_fdcb(
     var norm2 = 0.0
     for i in range(len(gradient)):
         norm2 += gradient[i] * gradient[i]
-    return FDCBPackedEvaluation(
+    return ObjectiveEvaluation(
         scenario_dose^,
         dose_min^,
         dose_max^,
@@ -554,7 +544,7 @@ def evaluate_validated_packed_physical_fdcb(
 
 
 def scatter_packed_physical_gradient(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     particles: List[Float64],
     voxel_index: Int,
     scenario_index: Int,
@@ -597,7 +587,7 @@ def scatter_packed_physical_gradient(
             Int(packed_slice.field_slice_index)
         ].copy()
         var slice_factor = (
-            factor * Float64(packed_slice.dose_coefficient) * FDCB_MEV_TO_GY
+            factor * Float64(packed_slice.dose_coefficient) * MEV_TO_GY
         )
         for local_entry in range(Int(packed_slice.coefficient_count)):
             var coefficient_index = (

@@ -40,10 +40,10 @@ apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
     if [[ '${BUILD_MOJO}' == 1 ]]; then
       '${UV}' sync --frozen
       .venv/bin/mojo build -I . -O3 -g1 \
-        --target-accelerator sm_90a --emit shared-lib fdcb_abi.mojo \
-        -Xlinker -lm -o '${MOJO_BUILD}/libtrip_fdcb_mojo.so'
+        --target-accelerator sm_90a --emit shared-lib trip_abi.mojo \
+        -Xlinker -lm -o '${MOJO_BUILD}/libtrip_mojo.so'
     fi
-    test -f '${MOJO_BUILD}/libtrip_fdcb_mojo.so'
+    test -f '${MOJO_BUILD}/libtrip_mojo.so'
     if [[ '${BUILD_TRIP}' == 1 ]]; then
       cmake -S '${TRIP}' -B '${TRIP_COMPILE_DIR}' \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -51,7 +51,7 @@ apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
         -DCMAKE_C_ABI_COMPILED=TRUE -DCMAKE_CXX_ABI_COMPILED=TRUE \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE='-O3 -DNDEBUG' \
         -DTRIP_MOJO_ROOT='${REPO}' \
-        -DTRIP_MOJO_LIBRARY='${MOJO_BUILD}/libtrip_fdcb_mojo.so'
+        -DTRIP_MOJO_LIBRARY='${MOJO_BUILD}/libtrip_mojo.so'
       cmake --build '${TRIP_COMPILE_DIR}' -j'${THREADS}'
       if [[ '${TRIP_COMPILE_DIR}' != '${TRIP_BUILD}' ]]; then
         cp -p '${TRIP_COMPILE_DIR}/TRiP98' '${TRIP_BUILD}/TRiP98'
@@ -65,4 +65,4 @@ apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
   "
 
 stat -c 'artifact %y %s %n' \
-  "${MOJO_BUILD}/libtrip_fdcb_mojo.so" "${TRIP_BUILD}/TRiP98"
+  "${MOJO_BUILD}/libtrip_mojo.so" "${TRIP_BUILD}/TRiP98"

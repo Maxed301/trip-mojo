@@ -7,7 +7,6 @@ from std.sys.info import size_of
 from reference_math import reference_exp
 
 
-comptime CLINICAL_DOSE_VERSION_V1 = UInt32(1)
 comptime CLINICAL_DOSE_BIOLOGICAL = UInt32(1)
 comptime CLINICAL_DOSE_DIVERGENT = UInt32(2)
 comptime CLINICAL_DOSE_ALGORITHM_MS = UInt32(1)
@@ -20,7 +19,7 @@ comptime CLINICAL_DOSE_8LN2 = 0.6932 * 8.0
 
 
 @fieldwise_init
-struct ClinicalDosePointV1(Copyable, Movable):
+struct ClinicalDosePoint(Copyable, Movable):
     var x: Float64
     var y: Float64
     var delta_z: Float64
@@ -29,7 +28,7 @@ struct ClinicalDosePointV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseDDDEntryV1(Copyable, Movable):
+struct ClinicalDoseDDDEntry(Copyable, Movable):
     var z_cm: Float64
     var dose: Float64
     var fwhm1: Float64
@@ -38,14 +37,14 @@ struct ClinicalDoseDDDEntryV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseDDDTableV1(Copyable, Movable):
+struct ClinicalDoseDDDTable(Copyable, Movable):
     var entry_offset: UInt32
     var entry_count: UInt32
     var column_count: UInt32
 
 
 @fieldwise_init
-struct ClinicalDoseBioEntryV1(Copyable, Movable):
+struct ClinicalDoseBioEntry(Copyable, Movable):
     var z_cm: Float64
     var alpha: Float64
     var sqrt_beta: Float64
@@ -55,14 +54,14 @@ struct ClinicalDoseBioEntryV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseBioTableV1(Copyable, Movable):
+struct ClinicalDoseBioTable(Copyable, Movable):
     var entry_offset: UInt32
     var entry_count: UInt32
     var z_scale: Float64
 
 
 @fieldwise_init
-struct ClinicalDoseEnergyV1(Copyable, Movable):
+struct ClinicalDoseEnergy(Copyable, Movable):
     var point_offset: UInt32
     var point_count: UInt32
     var ddd_table: UInt32
@@ -76,7 +75,7 @@ struct ClinicalDoseEnergyV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseFieldV1(Copyable, Movable):
+struct ClinicalDoseField(Copyable, Movable):
     var energy_offset: UInt32
     var energy_count: UInt32
     var dose_extension2: Float64
@@ -93,7 +92,7 @@ struct ClinicalDosePointRun(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseGridV1(Copyable, Movable):
+struct ClinicalDoseGrid(Copyable, Movable):
     var nx: Int32
     var ny: Int32
     var nz: Int32
@@ -109,8 +108,8 @@ struct ClinicalDoseGridV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseCTStateV1(Copyable, Movable):
-    var grid: ClinicalDoseGridV1
+struct ClinicalDoseCTState(Copyable, Movable):
+    var grid: ClinicalDoseGrid
     var data_offset: UInt64
     var x_boundary_offset: UInt64
     var y_boundary_offset: UInt64
@@ -121,20 +120,20 @@ struct ClinicalDoseCTStateV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseStateV1(Copyable, Movable):
+struct ClinicalDoseState(Copyable, Movable):
     var field_offset: UInt32
     var field_count: UInt32
 
 
 @fieldwise_init
-struct ClinicalDosePositionV1(Copyable, Movable):
+struct ClinicalDosePosition(Copyable, Movable):
     var x: Float64
     var y: Float64
     var z: Float64
 
 
 @fieldwise_init
-struct ClinicalDoseGridFieldV1(Copyable, Movable):
+struct ClinicalDoseGridField(Copyable, Movable):
     var field_index: UInt32
     var m00: Float64
     var m01: Float64
@@ -161,7 +160,7 @@ struct ClinicalDoseGridFieldV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseOutputV1(Copyable, Movable):
+struct ClinicalDoseOutput(Copyable, Movable):
     var absorbed_dose: Float64
     var alpha: Float64
     var sqrt_beta: Float64
@@ -171,8 +170,7 @@ struct ClinicalDoseOutputV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct ClinicalDoseProblemViewV1(Copyable, Movable):
-    var version: UInt32
+struct ClinicalDoseProblem(Copyable, Movable):
     var flags: UInt32
     var grid_voxel_count: UInt32
     var state_count: UInt32
@@ -195,26 +193,26 @@ struct ClinicalDoseProblemViewV1(Copyable, Movable):
     var dose_x_offset: UInt64
     var dose_y_offset: UInt64
     var dose_z_offset: UInt64
-    var dose_grid: ClinicalDoseGridV1
+    var dose_grid: ClinicalDoseGrid
     var voxel_voi: UnsafePointer[Int32, MutExternalOrigin]
-    var ct_states: UnsafePointer[ClinicalDoseCTStateV1, MutExternalOrigin]
+    var ct_states: UnsafePointer[ClinicalDoseCTState, MutExternalOrigin]
     var ct_data: UnsafePointer[Int16, MutExternalOrigin]
     var ct_boundaries: UnsafePointer[Float64, MutExternalOrigin]
     var dose_axis_centers: UnsafePointer[Float64, MutExternalOrigin]
     var hlut_x: UnsafePointer[Float64, MutExternalOrigin]
     var hlut_y: UnsafePointer[Float64, MutExternalOrigin]
-    var grid_fields: UnsafePointer[ClinicalDoseGridFieldV1, MutExternalOrigin]
-    var fields: UnsafePointer[ClinicalDoseFieldV1, MutExternalOrigin]
-    var energies: UnsafePointer[ClinicalDoseEnergyV1, MutExternalOrigin]
-    var points: UnsafePointer[ClinicalDosePointV1, MutExternalOrigin]
-    var ddd_tables: UnsafePointer[ClinicalDoseDDDTableV1, MutExternalOrigin]
-    var ddd_entries: UnsafePointer[ClinicalDoseDDDEntryV1, MutExternalOrigin]
-    var bio_tables: UnsafePointer[ClinicalDoseBioTableV1, MutExternalOrigin]
-    var bio_entries: UnsafePointer[ClinicalDoseBioEntryV1, MutExternalOrigin]
+    var grid_fields: UnsafePointer[ClinicalDoseGridField, MutExternalOrigin]
+    var fields: UnsafePointer[ClinicalDoseField, MutExternalOrigin]
+    var energies: UnsafePointer[ClinicalDoseEnergy, MutExternalOrigin]
+    var points: UnsafePointer[ClinicalDosePoint, MutExternalOrigin]
+    var ddd_tables: UnsafePointer[ClinicalDoseDDDTable, MutExternalOrigin]
+    var ddd_entries: UnsafePointer[ClinicalDoseDDDEntry, MutExternalOrigin]
+    var bio_tables: UnsafePointer[ClinicalDoseBioTable, MutExternalOrigin]
+    var bio_entries: UnsafePointer[ClinicalDoseBioEntry, MutExternalOrigin]
     var transformed_voxel_count: UInt64
-    var states: UnsafePointer[ClinicalDoseStateV1, MutExternalOrigin]
+    var states: UnsafePointer[ClinicalDoseState, MutExternalOrigin]
     var transformed_voxels: UnsafePointer[
-        ClinicalDosePositionV1, MutExternalOrigin
+        ClinicalDosePosition, MutExternalOrigin
     ]
 
 
@@ -266,11 +264,9 @@ def swap_i16(value: Int16) -> Int16:
     return rebind[Int16]((bits << 8) | (bits >> 8))
 
 
-def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
-    if view.struct_size != UInt32(size_of[ClinicalDoseProblemViewV1]()):
+def validate_clinical_dose(view: ClinicalDoseProblem) raises:
+    if view.struct_size != UInt32(size_of[ClinicalDoseProblem]()):
         raise Error("clinical dose ABI struct size mismatch")
-    if view.version != CLINICAL_DOSE_VERSION_V1:
-        raise Error("unsupported clinical dose problem version")
     if view.state_count == UInt32(0):
         raise Error("clinical dose requires at least one CT state")
     if view.grid_voxel_count == UInt32(0) or view.field_count == UInt32(0):
@@ -289,14 +285,14 @@ def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
         view.algorithm != CLINICAL_DOSE_ALGORITHM_MS
         and view.algorithm != CLINICAL_DOSE_ALGORITHM_MSDB
     ):
-        raise Error("clinical dose V1 supports only ms and msdb")
+        raise Error("clinical dose supports only ms and msdb")
     if (view.algorithm == CLINICAL_DOSE_ALGORITHM_MSDB) != (
         (view.flags & CLINICAL_DOSE_DIVERGENT) != UInt32(0)
     ):
         raise Error("clinical dose algorithm and divergent flag disagree")
     var biological = (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0)
     if biological and view.biology_model != CLINICAL_DOSE_BIOLOGY_LOW_DOSE:
-        raise Error("biological clinical dose V1 requires low-dose biology")
+        raise Error("biological clinical dose  requires low-dose biology")
     if not biological and view.biology_model != CLINICAL_DOSE_BIOLOGY_NONE:
         raise Error("physical clinical dose must not request a biology model")
     if view.max_threads == UInt32(0):
@@ -406,7 +402,7 @@ def validate_clinical_dose(view: ClinicalDoseProblemViewV1) raises:
 
 
 @always_inline("nodebug")
-def hlut_lookup(view: ClinicalDoseProblemViewV1, hu: Float64) -> Float64:
+def hlut_lookup(view: ClinicalDoseProblem, hu: Float64) -> Float64:
     var count = Int(view.hlut_count)
     if hu <= Float64(view.hlut_x[0]):
         return max2(0.0, Float64(view.hlut_y[0]))
@@ -431,7 +427,7 @@ def hlut_lookup(view: ClinicalDoseProblemViewV1, hu: Float64) -> Float64:
 
 
 def build_dense_hlut(
-    view: ClinicalDoseProblemViewV1, max_threads: Int
+    view: ClinicalDoseProblem, max_threads: Int
 ) -> List[Float64]:
     var dense = List[Float64]()
     dense.resize(65536, 0.0)
@@ -473,7 +469,7 @@ def boundary_bin[
 def siddon_h2o[
     ct_origin: Origin, boundary_origin: Origin, dense_origin: Origin, //
 ](
-    state: ClinicalDoseCTStateV1,
+    state: ClinicalDoseCTState,
     ct_data: UnsafePointer[Int16, ct_origin],
     ct_boundaries: UnsafePointer[Float64, boundary_origin],
     dense_hlut: UnsafePointer[Float64, dense_origin],
@@ -637,8 +633,8 @@ def siddon_h2o[
 def interpolate_ddd[
     entry_origin: Origin, //
 ](
-    table: ClinicalDoseDDDTableV1,
-    entries: UnsafePointer[ClinicalDoseDDDEntryV1, entry_origin],
+    table: ClinicalDoseDDDTable,
+    entries: UnsafePointer[ClinicalDoseDDDEntry, entry_origin],
     z_cm: Float64,
 ) -> DDDInterpolation:
     if table.entry_count == UInt32(0):
@@ -688,8 +684,8 @@ def interpolate_ddd[
 def interpolate_bio[
     entry_origin: Origin, //
 ](
-    table: ClinicalDoseBioTableV1,
-    entries: UnsafePointer[ClinicalDoseBioEntryV1, entry_origin],
+    table: ClinicalDoseBioTable,
+    entries: UnsafePointer[ClinicalDoseBioEntry, entry_origin],
     z_cm: Float64,
 ) -> BioInterpolation:
     if table.entry_count == UInt32(0):
@@ -738,7 +734,7 @@ def interpolate_bio[
 def compute_clinical_dose_voxel[
     dense_origin: Origin, offset_origin: Origin, run_origin: Origin, //
 ](
-    view: ClinicalDoseProblemViewV1,
+    view: ClinicalDoseProblem,
     dense_hlut: UnsafePointer[Float64, dense_origin],
     energy_run_offsets: UnsafePointer[UInt32, offset_origin],
     point_runs: UnsafePointer[ClinicalDosePointRun, run_origin],
@@ -749,8 +745,8 @@ def compute_clinical_dose_voxel[
     px: Float64,
     py: Float64,
     pz: Float64,
-) -> ClinicalDoseOutputV1:
-    var output = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+) -> ClinicalDoseOutput:
+    var output = ClinicalDoseOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     var biological = (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0)
     var voi = -1
     if biological:
@@ -823,7 +819,7 @@ def compute_clinical_dose_voxel[
                 continue
             var table = view.ddd_tables[Int(energy.ddd_table)].copy()
             var focus2 = Float64(energy.focus) * Float64(energy.focus)
-            var bio_table = ClinicalDoseBioTableV1(UInt32(0), UInt32(0), 0.0)
+            var bio_table = ClinicalDoseBioTable(UInt32(0), UInt32(0), 0.0)
             var bio = BioInterpolation(0.0, 0.0, 0.0, 0.0, 0.0)
             if biological:
                 bio_table = view.bio_tables[
@@ -917,8 +913,8 @@ def compute_clinical_dose_voxel[
 
 
 def compute_clinical_dose(
-    view: ClinicalDoseProblemViewV1,
-    output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
+    view: ClinicalDoseProblem,
+    output: UnsafePointer[ClinicalDoseOutput, MutExternalOrigin],
 ) raises:
     validate_clinical_dose(view)
     comptime assert CLINICAL_DOSE_THREADS > 0
@@ -959,7 +955,7 @@ def compute_clinical_dose(
         var start = row * Int(view.dose_grid.nx)
         var end = start + Int(view.dose_grid.nx)
         for voxel in range(start, end):
-            var total = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            var total = ClinicalDoseOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             var nx = Int(view.dose_grid.nx)
             var ny = Int(view.dose_grid.ny)
             var ix = voxel % nx
@@ -1010,13 +1006,13 @@ def compute_clinical_dose(
     )
 
 
-def clinical_dose_compute_abi_v1(
+def clinical_dose_compute_abi(
     problem_pointer: OpaquePointer[MutExternalOrigin],
-    output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
+    output: UnsafePointer[ClinicalDoseOutput, MutExternalOrigin],
     output_count: UInt64,
 ) -> Int32:
     try:
-        var view = problem_pointer.bitcast[ClinicalDoseProblemViewV1]()[].copy()
+        var view = problem_pointer.bitcast[ClinicalDoseProblem]()[].copy()
         if output_count != UInt64(view.grid_voxel_count):
             return Int32(-2)
         compute_clinical_dose(view, output)

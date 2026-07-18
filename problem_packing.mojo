@@ -1,30 +1,29 @@
-"""Explicit adapters from convenient host models to FDCBProblemV1."""
+"""Explicit adapters from convenient host models to OptimizationProblem."""
 
-from fdcb_optimizer import (
-    BioFDCBScenarioSet,
+from robust_objective import (
+    BiologicalScenarioSet,
     BioLQParams,
-    FDCBScenarioSet,
-    FDCBVoxelObjective,
-    validate_bio_fdcb_inputs,
-    validate_fdcb_inputs,
+    PhysicalScenarioSet,
+    VoxelObjective,
+    validate_biological_inputs,
+    validate_physical_inputs,
 )
-from fdcb_problem import (
-    FDCBFieldSliceV1,
-    FDCBMinimumParticlePolicyV1,
-    FDCBProblemV1,
-    FDCBScenarioStateV1,
-    FDCBSettingsV1,
-    FDCBSliceV1,
-    FDCBVoxelScenarioV1,
-    FDCBVoxelV1,
-    FDCB_PROBLEM_VERSION_V1,
-    FDCB_FLAG_BIOLOGICAL,
-    FDCB_MEV_TO_GY,
+from optimization_problem import (
+    FieldSlice,
+    MinimumParticlePolicy,
+    OptimizationProblem,
+    ScenarioState,
+    OptimizerSettings,
+    DoseMatrixSlice,
+    RobustScenario,
+    OptimizationVoxel,
+    OPTIMIZER_FLAG_BIOLOGICAL,
+    MEV_TO_GY,
 )
 
 
 @fieldwise_init
-struct FDCBNativeFieldSlice(Copyable, Movable):
+struct NativeFieldSlice(Copyable, Movable):
     """Convenient host description of one field/energy point partition."""
 
     var field_index: Int
@@ -38,21 +37,21 @@ struct FDCBNativeFieldSlice(Copyable, Movable):
 @fieldwise_init
 struct _PackedNativeFieldLayout(Copyable, Movable):
     var field_count: UInt32
-    var field_slices: List[FDCBFieldSliceV1]
+    var field_slices: List[FieldSlice]
     var point_field_slice_indices: List[UInt32]
     var point_local_indices: List[UInt16]
 
 
-def _single_native_field_slice(point_count: Int) -> List[FDCBNativeFieldSlice]:
-    return [FDCBNativeFieldSlice(0, 0, 0, point_count, 0, 0.0)]
+def _single_native_field_slice(point_count: Int) -> List[NativeFieldSlice]:
+    return [NativeFieldSlice(0, 0, 0, point_count, 0, 0.0)]
 
 
 def _pack_native_field_layout(
-    native_slices: List[FDCBNativeFieldSlice], point_count: Int
+    native_slices: List[NativeFieldSlice], point_count: Int
 ) raises -> _PackedNativeFieldLayout:
     if len(native_slices) == 0:
-        raise Error("native FDCB layout requires at least one field slice")
-    var packed = List[FDCBFieldSliceV1]()
+        raise Error("input layout requires at least one field slice")
+    var packed = List[FieldSlice]()
     var point_slices = List[UInt32]()
     var local_points = List[UInt16]()
     point_slices.resize(point_count, UInt32(0))
@@ -69,24 +68,24 @@ def _pack_native_field_layout(
             or native.raster_stride < 0
             or native.minimum_particles < 0.0
         ):
-            raise Error("native FDCB field-slice metadata is invalid")
+            raise Error("input field-slice metadata is invalid")
         if native.point_offset != expected_offset:
-            raise Error("native FDCB point ranges must be contiguous")
+            raise Error("input point ranges must be contiguous")
         if native.point_count > Int(UInt16.MAX) + 1:
             raise Error("native field slice exceeds UInt16 local indexing")
         if native.field_index != previous_field:
             if native.field_index != field_count:
-                raise Error("native FDCB fields must be grouped and contiguous")
+                raise Error("input fields must be grouped and contiguous")
             field_count += 1
             previous_field = native.field_index
         for local_point in range(native.point_count):
             var point = native.point_offset + local_point
             if point >= point_count:
-                raise Error("native FDCB field slices exceed the point arrays")
+                raise Error("input field slices exceed the point arrays")
             point_slices[point] = UInt32(slice_index)
             local_points[point] = UInt16(local_point)
         packed.append(
-            FDCBFieldSliceV1(
+            FieldSlice(
                 UInt32(native.field_index),
                 UInt32(native.beam_index),
                 UInt64(native.point_offset),
@@ -97,21 +96,21 @@ def _pack_native_field_layout(
         )
         expected_offset += native.point_count
     if expected_offset != point_count:
-        raise Error("native FDCB field slices do not cover the point arrays")
+        raise Error("input field slices do not cover the point arrays")
     return _PackedNativeFieldLayout(
         UInt32(field_count), packed^, point_slices^, local_points^
     )
 
 
-def pack_physical_fdcb_problem_v1(
-    scenarios: FDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def pack_physical_problem(
+    scenarios: PhysicalScenarioSet,
+    objectives: List[VoxelObjective],
     particles: List[Float64],
-    settings: FDCBSettingsV1,
-    minimum_particle_policy: FDCBMinimumParticlePolicyV1,
-) raises -> FDCBProblemV1:
+    settings: OptimizerSettings,
+    minimum_particle_policy: MinimumParticlePolicy,
+) raises -> OptimizationProblem:
     """Pack the simple native sparse model as one field/energy slice."""
-    return pack_physical_fdcb_problem_v1_with_fields(
+    return pack_physical_problem_with_fields(
         scenarios,
         objectives,
         _single_native_field_slice(len(particles)),
@@ -121,16 +120,16 @@ def pack_physical_fdcb_problem_v1(
     )
 
 
-def pack_physical_fdcb_problem_v1_with_fields(
-    scenarios: FDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
-    native_field_slices: List[FDCBNativeFieldSlice],
+def pack_physical_problem_with_fields(
+    scenarios: PhysicalScenarioSet,
+    objectives: List[VoxelObjective],
+    native_field_slices: List[NativeFieldSlice],
     particles: List[Float64],
-    settings: FDCBSettingsV1,
-    minimum_particle_policy: FDCBMinimumParticlePolicyV1,
-) raises -> FDCBProblemV1:
+    settings: OptimizerSettings,
+    minimum_particle_policy: MinimumParticlePolicy,
+) raises -> OptimizationProblem:
     """Pack global sparse spot indices through explicit field partitions."""
-    validate_fdcb_inputs(scenarios, objectives, particles)
+    validate_physical_inputs(scenarios, objectives, particles)
     var layout = _pack_native_field_layout(native_field_slices, len(particles))
     for scenario_index in range(len(scenarios.matrices)):
         var matrix = scenarios.matrices[scenario_index].copy()
@@ -142,7 +141,7 @@ def pack_physical_fdcb_problem_v1_with_fields(
                 or entry.spot < 0
                 or entry.spot >= matrix.spot_count
             ):
-                raise Error("native sparse FDCB entry is out of bounds")
+                raise Error("native sparse optimizer entry is out of bounds")
 
     var direction = List[Float64]()
     var initial_gradient = List[Float64]()
@@ -151,11 +150,11 @@ def pack_physical_fdcb_problem_v1_with_fields(
     initial_gradient.resize(len(particles), 0.0)
     point_active.resize(len(particles), UInt8(1))
 
-    var voxels = List[FDCBVoxelV1]()
+    var voxels = List[OptimizationVoxel]()
     for voxel_index in range(len(objectives)):
         var objective = objectives[voxel_index].copy()
         voxels.append(
-            FDCBVoxelV1(
+            OptimizationVoxel(
                 objective.dose_p,
                 objective.dose_w,
                 objective.dose_d,
@@ -175,9 +174,9 @@ def pack_physical_fdcb_problem_v1_with_fields(
             )
         )
 
-    var voxel_scenarios = List[FDCBVoxelScenarioV1]()
-    var scenario_states = List[FDCBScenarioStateV1]()
-    var slices = List[FDCBSliceV1]()
+    var voxel_scenarios = List[RobustScenario]()
+    var scenario_states = List[ScenarioState]()
+    var slices = List[DoseMatrixSlice]()
     var point_indices = List[UInt16]()
     var coefficients = List[Float64]()
     for voxel_index in range(len(objectives)):
@@ -198,12 +197,12 @@ def pack_physical_fdcb_problem_v1_with_fields(
                         )
                         coefficients.append(entry.value)
                 slices.append(
-                    FDCBSliceV1(
+                    DoseMatrixSlice(
                         UInt32(field_slice_index),
                         UInt32(0),
                         coefficient_offset,
                         UInt32(UInt64(len(coefficients)) - coefficient_offset),
-                        1.0 / FDCB_MEV_TO_GY,
+                        1.0 / MEV_TO_GY,
                         0.0,
                         0.0,
                         0.0,
@@ -211,15 +210,12 @@ def pack_physical_fdcb_problem_v1_with_fields(
                     )
                 )
             voxel_scenarios.append(
-                FDCBVoxelScenarioV1(
-                    slice_offset, UInt32(len(layout.field_slices))
-                )
+                RobustScenario(slice_offset, UInt32(len(layout.field_slices)))
             )
-            scenario_states.append(FDCBScenarioStateV1(0.0, 0.0, 0.0, 0.0))
+            scenario_states.append(ScenarioState(0.0, 0.0, 0.0, 0.0))
 
     var rng_state = List[UInt32]()
-    var problem = FDCBProblemV1(
-        FDCB_PROBLEM_VERSION_V1,
+    var problem = OptimizationProblem(
         settings.copy(),
         minimum_particle_policy.copy(),
         rng_state^,
@@ -241,16 +237,16 @@ def pack_physical_fdcb_problem_v1_with_fields(
     return problem^
 
 
-def pack_biological_fdcb_problem_v1(
-    scenarios: BioFDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def pack_biological_problem(
+    scenarios: BiologicalScenarioSet,
+    objectives: List[VoxelObjective],
     lq_params: List[BioLQParams],
     particles: List[Float64],
-    settings: FDCBSettingsV1,
-    minimum_particle_policy: FDCBMinimumParticlePolicyV1,
-) raises -> FDCBProblemV1:
+    settings: OptimizerSettings,
+    minimum_particle_policy: MinimumParticlePolicy,
+) raises -> OptimizationProblem:
     """Pack the simple native biological model as one field/energy slice."""
-    return pack_biological_fdcb_problem_v1_with_fields(
+    return pack_biological_problem_with_fields(
         scenarios,
         objectives,
         lq_params,
@@ -261,17 +257,17 @@ def pack_biological_fdcb_problem_v1(
     )
 
 
-def pack_biological_fdcb_problem_v1_with_fields(
-    scenarios: BioFDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def pack_biological_problem_with_fields(
+    scenarios: BiologicalScenarioSet,
+    objectives: List[VoxelObjective],
     lq_params: List[BioLQParams],
-    native_field_slices: List[FDCBNativeFieldSlice],
+    native_field_slices: List[NativeFieldSlice],
     particles: List[Float64],
-    settings: FDCBSettingsV1,
-    minimum_particle_policy: FDCBMinimumParticlePolicyV1,
-) raises -> FDCBProblemV1:
+    settings: OptimizerSettings,
+    minimum_particle_policy: MinimumParticlePolicy,
+) raises -> OptimizationProblem:
     """Pack biological entries through explicit field/energy partitions."""
-    validate_bio_fdcb_inputs(scenarios, objectives, lq_params, particles)
+    validate_biological_inputs(scenarios, objectives, lq_params, particles)
     var layout = _pack_native_field_layout(native_field_slices, len(particles))
     for scenario_index in range(len(scenarios.matrices)):
         var matrix = scenarios.matrices[scenario_index].copy()
@@ -283,7 +279,9 @@ def pack_biological_fdcb_problem_v1_with_fields(
                 or entry.spot < 0
                 or entry.spot >= matrix.spot_count
             ):
-                raise Error("native biological FDCB entry is out of bounds")
+                raise Error(
+                    "native biological optimizer entry is out of bounds"
+                )
 
     var spot_count = len(particles)
     var direction = List[Float64]()
@@ -292,12 +290,12 @@ def pack_biological_fdcb_problem_v1_with_fields(
     direction.resize(spot_count, 0.0)
     initial_gradient.resize(spot_count, 0.0)
     point_active.resize(spot_count, UInt8(1))
-    var voxels = List[FDCBVoxelV1]()
+    var voxels = List[OptimizationVoxel]()
     for voxel_index in range(len(objectives)):
         var objective = objectives[voxel_index].copy()
         var lq = lq_params[voxel_index].copy()
         voxels.append(
-            FDCBVoxelV1(
+            OptimizationVoxel(
                 objective.dose_p,
                 objective.dose_w,
                 objective.dose_d,
@@ -317,9 +315,9 @@ def pack_biological_fdcb_problem_v1_with_fields(
             )
         )
 
-    var voxel_scenarios = List[FDCBVoxelScenarioV1]()
-    var states = List[FDCBScenarioStateV1]()
-    var slices = List[FDCBSliceV1]()
+    var voxel_scenarios = List[RobustScenario]()
+    var states = List[ScenarioState]()
+    var slices = List[DoseMatrixSlice]()
     var point_indices = List[UInt16]()
     var coefficients = List[Float64]()
     for voxel_index in range(len(objectives)):
@@ -368,7 +366,7 @@ def pack_biological_fdcb_problem_v1_with_fields(
                     point_indices.append(layout.point_local_indices[entry.spot])
                     coefficients.append(entry.g)
                 slices.append(
-                    FDCBSliceV1(
+                    DoseMatrixSlice(
                         UInt32(field_slice_index),
                         UInt32(0),
                         coefficient_offset,
@@ -381,16 +379,13 @@ def pack_biological_fdcb_problem_v1_with_fields(
                     )
                 )
             voxel_scenarios.append(
-                FDCBVoxelScenarioV1(
-                    slice_offset, UInt32(len(layout.field_slices))
-                )
+                RobustScenario(slice_offset, UInt32(len(layout.field_slices)))
             )
-            states.append(FDCBScenarioStateV1(0.0, 0.0, 0.0, 0.0))
+            states.append(ScenarioState(0.0, 0.0, 0.0, 0.0))
     var packed_settings = settings.copy()
-    packed_settings.flags |= FDCB_FLAG_BIOLOGICAL
+    packed_settings.flags |= OPTIMIZER_FLAG_BIOLOGICAL
     var rng_state = List[UInt32]()
-    var problem = FDCBProblemV1(
-        FDCB_PROBLEM_VERSION_V1,
+    var problem = OptimizationProblem(
         packed_settings^,
         minimum_particle_policy.copy(),
         rng_state^,

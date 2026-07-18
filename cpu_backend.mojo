@@ -1,25 +1,25 @@
-"""Reference CPU kernels over the packed FDCB boundary."""
+"""Reference CPU kernels over the packed optimization boundary."""
 
 from std.algorithm import parallelize
 from std.math import sqrt
 
-from fdcb_problem import (
-    FDCBPackedEvaluation,
-    FDCBProblemV1,
-    FDCBSliceV1,
-    FDCBVoxelV1,
-    FDCB_FLAG_ROBUST_INCLUDE_DMAX,
-    FDCB_FLOAT64_EPSILON,
-    FDCB_MEV_TO_GY,
+from optimization_problem import (
+    ObjectiveEvaluation,
+    OptimizationProblem,
+    DoseMatrixSlice,
+    OptimizationVoxel,
+    OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX,
+    FLOAT64_EPSILON,
+    MEV_TO_GY,
     abs_f64,
 )
 
 
-comptime FDCB_CPU_THREADS = 12
+comptime CPU_THREADS = 12
 
 
 def packed_zero_gradient_direction(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
 ) raises -> List[Float64]:
     """Native fallback when no host-computed bootstrap was packed."""
     problem.validate()
@@ -30,9 +30,7 @@ def packed_zero_gradient_direction(
         if voxel.prescribed_dose <= 0.0:
             continue
         var weight = voxel.dose_weight / voxel.dose_divisor
-        var factor = (
-            voxel.prescribed_dose * weight * (2.0 * weight) * FDCB_MEV_TO_GY
-        )
+        var factor = voxel.prescribed_dose * weight * (2.0 * weight) * MEV_TO_GY
         var scenario = problem.voxel_scenarios[
             Int(voxel.scenario_offset)
         ].copy()
@@ -58,7 +56,7 @@ def packed_zero_gradient_direction(
 
 
 @fieldwise_init
-struct FDCBBioState(Copyable, Movable):
+struct BiologicalState(Copyable, Movable):
     var dose: Float64
     var dose_phys: Float64
     var alpha: Float64
@@ -70,8 +68,8 @@ struct FDCBBioState(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBBioEvaluation(Copyable, Movable):
-    var states: List[FDCBBioState]
+struct BiologicalEvaluation(Copyable, Movable):
+    var states: List[BiologicalState]
     var dose_min: List[Float64]
     var dose_max: List[Float64]
     var min_scenario: List[Int32]
@@ -83,7 +81,9 @@ struct FDCBBioEvaluation(Copyable, Movable):
 
 
 def packed_slice_dot(
-    problem: FDCBProblemV1, packed_slice: FDCBSliceV1, values: List[Float64]
+    problem: OptimizationProblem,
+    packed_slice: DoseMatrixSlice,
+    values: List[Float64],
 ) -> Float64:
     var field_slice = problem.field_slices[
         Int(packed_slice.field_slice_index)
@@ -102,19 +102,21 @@ def packed_slice_dot(
     return total
 
 
-def evaluate_packed_biological_fdcb(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> FDCBBioEvaluation:
+def evaluate_biological_objective(
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> BiologicalEvaluation:
     problem.validate()
-    return evaluate_validated_packed_biological_fdcb(problem, particles)
+    return evaluate_biological_objective_validated(problem, particles)
 
 
-def evaluate_validated_packed_biological_fdcb(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> FDCBBioEvaluation:
+def evaluate_biological_objective_validated(
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> BiologicalEvaluation:
     """Evaluate a problem already validated by the owning controller."""
     if len(particles) != len(problem.particles):
-        raise Error("particle vector length does not match packed FDCB problem")
+        raise Error(
+            "particle vector length does not match packed optimization problem"
+        )
     var states = packed_biological_states(problem, particles)
     var dose_min = List[Float64]()
     var dose_max = List[Float64]()
@@ -173,9 +175,9 @@ def evaluate_validated_packed_biological_fdcb(
         weighted += (dose_weight * voxel.prescribed_dose) * (
             dose_weight * voxel.prescribed_dose
         )
-        if (problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX) != UInt32(
-            0
-        ) and voxel.prescribed_dose > 0.0:
+        if (
+            problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
+        ) != UInt32(0) and voxel.prescribed_dose > 0.0:
             var max_weight = voxel.maximum_dose_weight / voxel.dose_divisor
             var max_residual = prescribed - dmax
             chi2 += (max_residual * max_weight) * (max_residual * max_weight)
@@ -184,12 +186,12 @@ def evaluate_validated_packed_biological_fdcb(
             )
     var point_count = len(problem.particles)
     var thread_gradients = List[Float64]()
-    thread_gradients.resize(FDCB_CPU_THREADS * point_count, 0.0)
+    thread_gradients.resize(CPU_THREADS * point_count, 0.0)
 
     @parameter
     def scatter_worker(worker: Int):
-        var start = worker * len(problem.voxels) // FDCB_CPU_THREADS
-        var end = (worker + 1) * len(problem.voxels) // FDCB_CPU_THREADS
+        var start = worker * len(problem.voxels) // CPU_THREADS
+        var end = (worker + 1) * len(problem.voxels) // CPU_THREADS
         var output_base = worker * point_count
         for voxel_index in range(start, end):
             var voxel = problem.voxels[voxel_index].copy()
@@ -211,10 +213,8 @@ def evaluate_validated_packed_biological_fdcb(
                 output_base,
             )
             if (
-                (problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX)
-                != UInt32(0)
-                and voxel.prescribed_dose > 0.0
-            ):
+                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
+            ) != UInt32(0) and voxel.prescribed_dose > 0.0:
                 var maximum = Int(max_scenario[voxel_index])
                 scatter_packed_biological_gradient(
                     problem,
@@ -228,8 +228,8 @@ def evaluate_validated_packed_biological_fdcb(
                     output_base,
                 )
 
-    parallelize[scatter_worker](FDCB_CPU_THREADS, FDCB_CPU_THREADS)
-    for worker in range(FDCB_CPU_THREADS):
+    parallelize[scatter_worker](CPU_THREADS, CPU_THREADS)
+    for worker in range(CPU_THREADS):
         var base = worker * point_count
         for point in range(point_count):
             gradient[point] += thread_gradients[base + point]
@@ -237,7 +237,7 @@ def evaluate_validated_packed_biological_fdcb(
     var norm2 = 0.0
     for value in gradient:
         norm2 += value * value
-    return FDCBBioEvaluation(
+    return BiologicalEvaluation(
         states^,
         dose_min^,
         dose_max^,
@@ -251,13 +251,13 @@ def evaluate_validated_packed_biological_fdcb(
 
 
 def packed_biological_states(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> List[FDCBBioState]:
-    comptime assert FDCB_CPU_THREADS > 0
-    var states = List[FDCBBioState]()
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> List[BiologicalState]:
+    comptime assert CPU_THREADS > 0
+    var states = List[BiologicalState]()
     states.resize(
         len(problem.voxel_scenarios),
-        FDCBBioState(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        BiologicalState(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
     var particle_ptr = Span(particles).unsafe_ptr()
     var voxel_ptr = Span(problem.voxels).unsafe_ptr()
@@ -270,9 +270,7 @@ def packed_biological_states(
 
     @parameter
     def compute_state(vs_index: Int):
-        var voxel = voxel_ptr[
-            vs_index // Int(problem.scenario_count)
-        ].copy()
+        var voxel = voxel_ptr[vs_index // Int(problem.scenario_count)].copy()
         var base = state_ptr[vs_index].copy()
         var dose_phys = base.dose_minor
         var alpha = base.alpha_minor
@@ -304,13 +302,13 @@ def packed_biological_states(
 
         var dose = voxel.initial_dose
         var let_bar = 0.0
-        var dose_phs = let_mix * FDCB_MEV_TO_GY
+        var dose_phs = let_mix * MEV_TO_GY
         var denominator = 0.0
         if dose_phys > 0.0 and let_mix > 0.0:
             let_bar = let_bar_sum / let_mix
             if dose_phs <= voxel.rbe_cut:
-                var damage = FDCB_MEV_TO_GY * (
-                    sqrt_beta * sqrt_beta * FDCB_MEV_TO_GY + alpha
+                var damage = MEV_TO_GY * (
+                    sqrt_beta * sqrt_beta * MEV_TO_GY + alpha
                 )
                 if voxel.rbe_beta != 0.0:
                     denominator = sqrt(
@@ -319,7 +317,7 @@ def packed_biological_states(
                     )
                     dose += (
                         dose_phys
-                        * FDCB_MEV_TO_GY
+                        * MEV_TO_GY
                         * (
                             (denominator - voxel.rbe_alpha)
                             / (voxel.rbe_beta * 2.0)
@@ -330,7 +328,7 @@ def packed_biological_states(
                     denominator = voxel.rbe_alpha
                     dose += (
                         dose_phys
-                        * FDCB_MEV_TO_GY
+                        * MEV_TO_GY
                         * (damage / voxel.rbe_alpha)
                         / dose_phs
                     )
@@ -343,8 +341,8 @@ def packed_biological_states(
                     damage - voxel.rbe_damage_cut
                 ) / voxel.rbe_slope_max + voxel.rbe_cut
                 denominator = voxel.rbe_slope_max
-                dose += dose_phys * FDCB_MEV_TO_GY * bio_dose / dose_phs
-        states[vs_index] = FDCBBioState(
+                dose += dose_phys * MEV_TO_GY * bio_dose / dose_phs
+        states[vs_index] = BiologicalState(
             dose,
             dose_phys,
             alpha,
@@ -355,16 +353,16 @@ def packed_biological_states(
             denominator,
         )
 
-    parallelize[compute_state](len(states), FDCB_CPU_THREADS)
+    parallelize[compute_state](len(states), CPU_THREADS)
     return states^
 
 
 def scatter_packed_biological_gradient(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     particles: List[Float64],
     voxel_index: Int,
     scenario_index: Int,
-    state: FDCBBioState,
+    state: BiologicalState,
     pass_weight: Float64,
     mut gradient: List[Float64],
     maximum_pass: Bool = False,
@@ -414,11 +412,11 @@ def scatter_packed_biological_gradient(
         if state.dose_phs <= voxel.rbe_cut:
             grad_bio = (
                 Float64(packed_slice.alpha_coefficient)
-                + FDCB_MEV_TO_GY
+                + MEV_TO_GY
                 * state.sqrt_beta
                 * 2.0
                 * Float64(packed_slice.sqrt_beta_coefficient)
-            ) * FDCB_MEV_TO_GY
+            ) * MEV_TO_GY
         else:
             var cut_scale = voxel.rbe_cut / state.let_mix
             grad_bio = (
@@ -437,7 +435,7 @@ def scatter_packed_biological_gradient(
                 * cut_scale
             ) * cut_scale + Float64(
                 packed_slice.let_mix_coefficient
-            ) * FDCB_MEV_TO_GY * voxel.rbe_slope_max
+            ) * MEV_TO_GY * voxel.rbe_slope_max
         var scale = (
             factor * grad_bio / state.gradient_denominator
             + let_residual * let_prim
@@ -450,9 +448,10 @@ def scatter_packed_biological_gradient(
         for local_entry in range(Int(packed_slice.coefficient_count)):
             var coefficient_index = coefficient_base + local_entry
             var point_index = point_base + Int(index_ptr[coefficient_index])
-            if active_ptr[point_index] != UInt8(0) and particle_ptr[
-                point_index
-            ] != 0.0:
+            if (
+                active_ptr[point_index] != UInt8(0)
+                and particle_ptr[point_index] != 0.0
+            ):
                 output_ptr[output_base + point_index] += scale * Float64(
                     coefficient_ptr[coefficient_index]
                 )
@@ -464,7 +463,7 @@ def packed_let_residual(
     let_weight: Float64,
     actual_let: Float64,
 ) -> Float64:
-    if let_weight <= FDCB_FLOAT64_EPSILON or prescribed_let <= 0.0:
+    if let_weight <= FLOAT64_EPSILON or prescribed_let <= 0.0:
         return 0.0
     var residual = prescribed_let - actual_let
     if prescribed_dose > 0.0:
@@ -476,9 +475,9 @@ def packed_let_residual(
 
 
 def scatter_slice(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     particles: List[Float64],
-    packed_slice: FDCBSliceV1,
+    packed_slice: DoseMatrixSlice,
     scale: Float64,
     mut output: List[Float64],
     output_base: Int = 0,
@@ -502,12 +501,12 @@ def scatter_slice(
             )
 
 
-def fdcb_exact_step_physical(
-    problem: FDCBProblemV1,
-    evaluation: FDCBPackedEvaluation,
+def compute_physical_exact_step(
+    problem: OptimizationProblem,
+    evaluation: ObjectiveEvaluation,
     direction: List[Float64],
 ) raises -> Float64:
-    return fdcb_exact_step(
+    return compute_exact_step(
         problem,
         evaluation.dose_min,
         evaluation.dose_max,
@@ -517,12 +516,12 @@ def fdcb_exact_step_physical(
     )
 
 
-def fdcb_exact_step_biological(
-    problem: FDCBProblemV1,
-    evaluation: FDCBBioEvaluation,
+def compute_biological_exact_step(
+    problem: OptimizationProblem,
+    evaluation: BiologicalEvaluation,
     direction: List[Float64],
 ) raises -> Float64:
-    return fdcb_exact_step(
+    return compute_exact_step(
         problem,
         evaluation.dose_min,
         evaluation.dose_max,
@@ -532,8 +531,8 @@ def fdcb_exact_step_biological(
     )
 
 
-def fdcb_exact_step(
-    problem: FDCBProblemV1,
+def compute_exact_step(
+    problem: OptimizationProblem,
     dose_min: List[Float64],
     dose_max: List[Float64],
     min_scenario: List[Int32],
@@ -541,11 +540,13 @@ def fdcb_exact_step(
     direction: List[Float64],
 ) raises -> Float64:
     if len(direction) != len(problem.particles):
-        raise Error("direction length does not match packed FDCB problem")
+        raise Error(
+            "direction length does not match packed optimization problem"
+        )
     var numerators = List[Float64]()
     var denominators = List[Float64]()
-    numerators.resize(FDCB_CPU_THREADS, 0.0)
-    denominators.resize(FDCB_CPU_THREADS, 0.0)
+    numerators.resize(CPU_THREADS, 0.0)
+    denominators.resize(CPU_THREADS, 0.0)
     var direction_ptr = Span(direction).unsafe_ptr()
     var scenario_ptr = Span(problem.voxel_scenarios).unsafe_ptr()
     var slice_ptr = Span(problem.slices).unsafe_ptr()
@@ -557,8 +558,8 @@ def fdcb_exact_step(
     def exact_step_worker(worker: Int):
         var numerator = 0.0
         var denominator = 0.0
-        var start = worker * len(problem.voxels) // FDCB_CPU_THREADS
-        var end = (worker + 1) * len(problem.voxels) // FDCB_CPU_THREADS
+        var start = worker * len(problem.voxels) // CPU_THREADS
+        var end = (worker + 1) * len(problem.voxels) // CPU_THREADS
         for voxel_index in range(start, end):
             var voxel = problem.voxels[voxel_index].copy()
             if voxel.prescribed_dose == 0.0:
@@ -581,9 +582,7 @@ def fdcb_exact_step(
                         Int(packed_slice.field_slice_index)
                     ].copy()
                     var dot = 0.0
-                    var coefficient_base = Int(
-                        packed_slice.coefficient_offset
-                    )
+                    var coefficient_base = Int(packed_slice.coefficient_offset)
                     var point_base = Int(field_slice.point_offset)
                     for local_entry in range(
                         Int(packed_slice.coefficient_count)
@@ -595,10 +594,8 @@ def fdcb_exact_step(
                         dot += direction_ptr[point_index] * Float64(
                             coefficient_ptr[coefficient_index]
                         )
-                    response += dot * Float64(
-                        packed_slice.dose_coefficient
-                    )
-                response *= FDCB_MEV_TO_GY * problem.settings.fractions
+                    response += dot * Float64(packed_slice.dose_coefficient)
+                response *= MEV_TO_GY * problem.settings.fractions
                 if response_pass == 0:
                     rmin = response
                 else:
@@ -625,10 +622,8 @@ def fdcb_exact_step(
             )
             denominator += weighted_response * weighted_response
             if (
-                (problem.settings.flags & FDCB_FLAG_ROBUST_INCLUDE_DMAX)
-                != UInt32(0)
-                and voxel.prescribed_dose > 0.0
-            ):
+                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
+            ) != UInt32(0) and voxel.prescribed_dose > 0.0:
                 residual = (
                     abs_f64(voxel.prescribed_dose) - dose_max[voxel_index]
                 )
@@ -645,10 +640,10 @@ def fdcb_exact_step(
         numerators[worker] = numerator
         denominators[worker] = denominator
 
-    parallelize[exact_step_worker](FDCB_CPU_THREADS, FDCB_CPU_THREADS)
+    parallelize[exact_step_worker](CPU_THREADS, CPU_THREADS)
     var numerator = 0.0
     var denominator = 0.0
-    for worker in range(FDCB_CPU_THREADS):
+    for worker in range(CPU_THREADS):
         numerator += numerators[worker]
         denominator += denominators[worker]
     if denominator == 0.0:
@@ -657,8 +652,8 @@ def fdcb_exact_step(
 
 
 def packed_directional_dose(
-    problem: FDCBProblemV1,
-    voxel: FDCBVoxelV1,
+    problem: OptimizationProblem,
+    voxel: OptimizationVoxel,
     scenario_index: Int,
     direction: List[Float64],
 ) -> Float64:
@@ -673,4 +668,4 @@ def packed_directional_dose(
         total += packed_slice_dot(problem, packed_slice, direction) * Float64(
             packed_slice.dose_coefficient
         )
-    return total * FDCB_MEV_TO_GY * problem.settings.fractions
+    return total * MEV_TO_GY * problem.settings.fractions

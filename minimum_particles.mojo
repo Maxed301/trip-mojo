@@ -1,16 +1,16 @@
 """Deterministic host-side minimum-particle policy."""
 
-from fdcb_problem import (
-    FDCBFieldSliceV1,
-    FDCBProblemV1,
-    FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG,
-    FDCB_MIN_PARTICLE_DISABLED,
+from optimization_problem import (
+    FieldSlice,
+    OptimizationProblem,
+    MINIMUM_PARTICLE_COMPLEX_HOST_RNG,
+    MINIMUM_PARTICLE_DISABLED,
 )
 from reference_math import reference_exp
 
 
 @fieldwise_init
-struct FDCBHostRNG(Copyable, Movable):
+struct HostRandomState(Copyable, Movable):
     """The seeded 31-word generator used by the reference libc rand()."""
 
     var state: List[UInt32]
@@ -36,7 +36,7 @@ struct FDCBHostRNG(Copyable, Movable):
         out self, var state: List[UInt32], front: UInt32, rear: UInt32
     ) raises:
         if len(state) != 31 or front >= UInt32(31) or rear >= UInt32(31):
-            raise Error("invalid restored FDCB host RNG state")
+            raise Error("invalid restored optimizer host RNG state")
         self.state = state^
         self.front = Int(front)
         self.rear = Int(rear)
@@ -59,45 +59,45 @@ struct FDCBHostRNG(Copyable, Movable):
         return Float64(self.next()) < 2147483647.0 * probability
 
 
-def make_host_rng(problem: FDCBProblemV1) raises -> FDCBHostRNG:
+def make_host_rng(problem: OptimizationProblem) raises -> HostRandomState:
     if len(problem.host_rng_state) == 31:
-        return FDCBHostRNG(
+        return HostRandomState(
             problem.host_rng_state.copy(),
             problem.minimum_particle_policy.rng_front,
             problem.minimum_particle_policy.rng_rear,
         )
-    return FDCBHostRNG(problem.minimum_particle_policy.seed)
+    return HostRandomState(problem.minimum_particle_policy.seed)
 
 
 @fieldwise_init
-struct FDCBMinimumParticleResult(Copyable, Movable):
+struct MinimumParticleUpdate(Copyable, Movable):
     var deleted: UInt64
     var random_draws: UInt64
 
 
 @fieldwise_init
-struct FDCBParticleUpdate(Copyable, Movable):
+struct ParticleUpdate(Copyable, Movable):
     var particles: List[Float64]
-    var minimum_particles: FDCBMinimumParticleResult
+    var minimum_particles: MinimumParticleUpdate
 
 
 @fieldwise_init
-struct FDCBFinalMinimumParticleResult(Copyable, Movable):
+struct FinalMinimumParticleUpdate(Copyable, Movable):
     var changed: UInt64
     var deleted: UInt64
 
 
 def apply_final_minimum_particle_limit(
-    problem: FDCBProblemV1, mut particles: List[Float64]
-) raises -> FDCBFinalMinimumParticleResult:
+    problem: OptimizationProblem, mut particles: List[Float64]
+) raises -> FinalMinimumParticleUpdate:
     """Apply TRiP's non-random post-optimization complexminp clamp."""
     if len(particles) != len(problem.particles):
         raise Error("minimum-particle vector length mismatch")
     if (
         problem.minimum_particle_policy.kind
-        != FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+        != MINIMUM_PARTICLE_COMPLEX_HOST_RNG
     ):
-        return FDCBFinalMinimumParticleResult(UInt64(0), UInt64(0))
+        return FinalMinimumParticleUpdate(UInt64(0), UInt64(0))
     var changed = UInt64(0)
     var deleted = UInt64(0)
     for field_slice in problem.field_slices:
@@ -117,17 +117,17 @@ def apply_final_minimum_particle_limit(
                 deleted += UInt64(1)
             else:
                 particles[point] = field_slice.minimum_particles
-    return FDCBFinalMinimumParticleResult(changed, deleted)
+    return FinalMinimumParticleUpdate(changed, deleted)
 
 
 def apply_minimum_particle_policy(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     mut particles: List[Float64],
     direction: List[Float64],
     gradient_limit: Float64,
     iteration_probability: Float64,
-    mut rng: FDCBHostRNG,
-) raises -> FDCBMinimumParticleResult:
+    mut rng: HostRandomState,
+) raises -> MinimumParticleUpdate:
     if len(particles) != len(problem.particles) or len(direction) != len(
         particles
     ):
@@ -156,18 +156,18 @@ def apply_minimum_particle_policy(
             )
             deleted += result.deleted
             draws += result.random_draws
-    return FDCBMinimumParticleResult(deleted, draws)
+    return MinimumParticleUpdate(deleted, draws)
 
 
 def update_with_minimum_particle_policy(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     baseline: List[Float64],
     direction: List[Float64],
     step: Float64,
     gradient_limit: Float64,
     iteration_probability: Float64,
-    mut rng: FDCBHostRNG,
-) raises -> FDCBParticleUpdate:
+    mut rng: HostRandomState,
+) raises -> ParticleUpdate:
     var particles = baseline.copy()
     var deleted = UInt64(0)
     var draws = UInt64(0)
@@ -192,32 +192,30 @@ def update_with_minimum_particle_policy(
             )
             deleted += result.deleted
             draws += result.random_draws
-    return FDCBParticleUpdate(
-        particles^, FDCBMinimumParticleResult(deleted, draws)
-    )
+    return ParticleUpdate(particles^, MinimumParticleUpdate(deleted, draws))
 
 
 def handle_minimum_particle(
-    problem: FDCBProblemV1,
-    field_slice: FDCBFieldSliceV1,
+    problem: OptimizationProblem,
+    field_slice: FieldSlice,
     local_point: Int,
     direction: List[Float64],
     gradient_limit: Float64,
     iteration_probability: Float64,
     mut particles: List[Float64],
-    mut rng: FDCBHostRNG,
-) -> FDCBMinimumParticleResult:
+    mut rng: HostRandomState,
+) -> MinimumParticleUpdate:
     var point = Int(field_slice.point_offset) + local_point
-    if problem.minimum_particle_policy.kind == FDCB_MIN_PARTICLE_DISABLED:
-        return FDCBMinimumParticleResult(UInt64(0), UInt64(0))
+    if problem.minimum_particle_policy.kind == MINIMUM_PARTICLE_DISABLED:
+        return MinimumParticleUpdate(UInt64(0), UInt64(0))
     if (
         problem.minimum_particle_policy.kind
-        != FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+        != MINIMUM_PARTICLE_COMPLEX_HOST_RNG
     ) or particles[point] < 0.0:
         particles[point] = 0.0
-        return FDCBMinimumParticleResult(UInt64(1), UInt64(0))
+        return MinimumParticleUpdate(UInt64(1), UInt64(0))
     if not rng.less_than(iteration_probability):
-        return FDCBMinimumParticleResult(UInt64(0), UInt64(1))
+        return MinimumParticleUpdate(UInt64(0), UInt64(1))
     var previous = particles[point]
     var particle_probability = 1.0 / (
         1.0 + reference_exp(-(previous / field_slice.minimum_particles - 0.5))
@@ -246,12 +244,12 @@ def handle_minimum_particle(
     var deleted = UInt64(0)
     if was_deleted:
         deleted = UInt64(1)
-    return FDCBMinimumParticleResult(deleted, UInt64(2))
+    return MinimumParticleUpdate(deleted, UInt64(2))
 
 
 def redistribute_minimum_particle_delta(
-    problem: FDCBProblemV1,
-    field_slice: FDCBFieldSliceV1,
+    problem: OptimizationProblem,
+    field_slice: FieldSlice,
     local_point: Int,
     previous: Float64,
     was_deleted: Bool,

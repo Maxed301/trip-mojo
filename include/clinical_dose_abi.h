@@ -1,5 +1,5 @@
-#ifndef TRIP_MOJO_CLINICAL_DOSE_ABI_V1_H
-#define TRIP_MOJO_CLINICAL_DOSE_ABI_V1_H
+#ifndef TRIP_MOJO_CLINICAL_DOSE_ABI_H
+#define TRIP_MOJO_CLINICAL_DOSE_ABI_H
 
 #include <stdint.h>
 
@@ -8,7 +8,6 @@ extern "C" {
 #endif
 
 enum {
-    CLINICAL_DOSE_VERSION_V1 = 1,
     CLINICAL_DOSE_BIOLOGICAL = 1u << 0,
     CLINICAL_DOSE_DIVERGENT = 1u << 1,
     CLINICAL_DOSE_ALGORITHM_MS = 1,
@@ -19,57 +18,57 @@ enum {
 
 typedef struct {
     double x, y, delta_z, f2_max, particles;
-} ClinicalDosePointV1;
+} ClinicalDosePoint;
 
 typedef struct {
     double z_cm, dose, fwhm1, mix, fwhm2;
-} ClinicalDoseDDDEntryV1;
+} ClinicalDoseDDDEntry;
 
 typedef struct {
     uint32_t entry_offset, entry_count, column_count;
-} ClinicalDoseDDDTableV1;
+} ClinicalDoseDDDTable;
 
 typedef struct {
     double z_cm, alpha, sqrt_beta, let_mix, let_bar, let_dm_sum;
-} ClinicalDoseBioEntryV1;
+} ClinicalDoseBioEntry;
 
 typedef struct {
     uint32_t entry_offset, entry_count;
     double z_scale;
-} ClinicalDoseBioTableV1;
+} ClinicalDoseBioTable;
 
 typedef struct {
     uint32_t point_offset, point_count, ddd_table, bio_table_offset;
     double focus, range_shifter;
     double window_x0, window_x1, window_y0, window_y1;
-} ClinicalDoseEnergyV1;
+} ClinicalDoseEnergy;
 
 typedef struct {
     uint32_t energy_offset, energy_count;
     double dose_extension2, scanner_x, scanner_y;
-} ClinicalDoseFieldV1;
+} ClinicalDoseField;
 
 typedef struct {
     int32_t nx, ny, nz;
     double x0, y0, z0;
     double dx, dy, dz;
     double boundary_x0, boundary_y0, boundary_z0;
-} ClinicalDoseGridV1;
+} ClinicalDoseGrid;
 
 typedef struct {
-    ClinicalDoseGridV1 grid;
+    ClinicalDoseGrid grid;
     uint64_t data_offset, x_boundary_offset, y_boundary_offset, z_boundary_offset;
     double pmod, pore_size;
     int32_t byte_swap;
-} ClinicalDoseCTStateV1;
+} ClinicalDoseCTState;
 
 typedef struct {
     uint32_t field_offset, field_count;
-} ClinicalDoseStateV1;
+} ClinicalDoseState;
 
 typedef struct {
     double x, y, z;
-} ClinicalDosePositionV1;
+} ClinicalDosePosition;
 
 typedef struct {
     uint32_t field_index;
@@ -78,14 +77,14 @@ typedef struct {
     double off_h2o, bolus;
     double window_x0, window_x1, window_y0, window_y1;
     int32_t gated;
-} ClinicalDoseGridFieldV1;
+} ClinicalDoseGridField;
 
 typedef struct {
     double absorbed_dose, alpha, sqrt_beta, let_mix, let_bar, let_dm_sum;
-} ClinicalDoseOutputV1;
+} ClinicalDoseOutput;
 
 typedef struct {
-    uint32_t version, flags;
+    uint32_t flags;
     uint32_t grid_voxel_count, state_count, field_count;
     uint32_t energy_count, point_count;
     uint32_t ddd_table_count, ddd_entry_count;
@@ -93,39 +92,39 @@ typedef struct {
     uint32_t hlut_count, algorithm, biology_model, max_threads, struct_size;
     uint64_t ct_value_count, ct_boundary_count, dose_axis_count;
     uint64_t dose_x_offset, dose_y_offset, dose_z_offset;
-    ClinicalDoseGridV1 dose_grid;
+    ClinicalDoseGrid dose_grid;
     const int32_t *voxel_voi;
-    const ClinicalDoseCTStateV1 *ct_states;
+    const ClinicalDoseCTState *ct_states;
     const int16_t *ct_data;
     const double *ct_boundaries;
     const double *dose_axis_centers;
     const double *hlut_x, *hlut_y;
-    const ClinicalDoseGridFieldV1 *grid_fields;
-    const ClinicalDoseFieldV1 *fields;
-    const ClinicalDoseEnergyV1 *energies;
-    const ClinicalDosePointV1 *points;
-    const ClinicalDoseDDDTableV1 *ddd_tables;
-    const ClinicalDoseDDDEntryV1 *ddd_entries;
-    const ClinicalDoseBioTableV1 *bio_tables;
-    const ClinicalDoseBioEntryV1 *bio_entries;
+    const ClinicalDoseGridField *grid_fields;
+    const ClinicalDoseField *fields;
+    const ClinicalDoseEnergy *energies;
+    const ClinicalDosePoint *points;
+    const ClinicalDoseDDDTable *ddd_tables;
+    const ClinicalDoseDDDEntry *ddd_entries;
+    const ClinicalDoseBioTable *bio_tables;
+    const ClinicalDoseBioEntry *bio_entries;
     /* Empty for static dose. For 4D, state-major positions transformed from
        the reference dose grid and contiguous field ranges are required. */
     uint64_t transformed_voxel_count;
-    const ClinicalDoseStateV1 *states;
-    const ClinicalDosePositionV1 *transformed_voxels;
-} ClinicalDoseProblemViewV1;
+    const ClinicalDoseState *states;
+    const ClinicalDosePosition *transformed_voxels;
+} ClinicalDoseProblem;
 
 /* Returns 0 on success, -1 for invalid input, and -2 for output-size mismatch. */
-int32_t trip_clinical_dose_compute_v1(
-    const ClinicalDoseProblemViewV1 *problem,
-    ClinicalDoseOutputV1 *output,
+int32_t trip_compute_clinical_dose(
+    const ClinicalDoseProblem *problem,
+    ClinicalDoseOutput *output,
     uint64_t output_count
 );
 
 /* Same contract on the shared accelerator backend; -3 if not compiled in. */
-int32_t trip_clinical_dose_compute_accelerator_v1(
-    const ClinicalDoseProblemViewV1 *problem,
-    ClinicalDoseOutputV1 *output,
+int32_t trip_compute_clinical_dose_on_device(
+    const ClinicalDoseProblem *problem,
+    ClinicalDoseOutput *output,
     uint64_t output_count
 );
 

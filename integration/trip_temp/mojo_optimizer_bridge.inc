@@ -1,25 +1,25 @@
-#include "fdcb_abi_v1.h"
-#include "fdcb_matrix_abi_v1.h"
+#include "optimizer_abi.h"
+#include "matrix_abi.h"
 #include <malloc.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-static int gFDCBMojoFinalMinimumApplied = 0;
+static int gMojoFinalMinimumApplied = 0;
 
 __attribute__((constructor))
-static void FDCBMojoConfigureAllocator(void) {
+static void MojoConfigureAllocator(void) {
    setenv("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_CHUNK_PERCENT", "90", 1);
    setenv("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT", "90", 1);
 }
 
-static int FDCBMojoPackThreads(void) {
+static int MojoPackThreads(void) {
    int threads = omp_get_max_threads() / 2;
    if ( threads < 1 ) return 1;
    return threads > 32 ? 32 : threads;
 }
 
-static int FDCBMojoDeviceListCount(const char *value) {
+static int MojoVisibleDeviceListCount(const char *value) {
    int count = 1;
    if ( value == NULL || *value == '\0' || !strcmp(value, "NoDevFiles") )
       return 0;
@@ -28,16 +28,16 @@ static int FDCBMojoDeviceListCount(const char *value) {
    return count;
 }
 
-static int FDCBMojoDeviceCount(void) {
+static int MojoDeviceCount(void) {
    const char *value = getenv("ROCR_VISIBLE_DEVICES");
-   int count = FDCBMojoDeviceListCount(value);
+   int count = MojoVisibleDeviceListCount(value);
    if ( count == 0 ) {
       value = getenv("HIP_VISIBLE_DEVICES");
-      count = FDCBMojoDeviceListCount(value);
+      count = MojoVisibleDeviceListCount(value);
    }
    if ( count == 0 ) {
       value = getenv("CUDA_VISIBLE_DEVICES");
-      count = FDCBMojoDeviceListCount(value);
+      count = MojoVisibleDeviceListCount(value);
    }
    if ( count == 0 ) {
       value = getenv("SLURM_GPUS_ON_NODE");
@@ -51,7 +51,7 @@ static int FDCBMojoDeviceCount(void) {
    return count == 0 ? 1 : count;
 }
 
-static int FDCBMojoUsesNvidiaRuntime(void) {
+static int MojoUsesNvidiaRuntime(void) {
    const char *rocr = getenv("ROCR_VISIBLE_DEVICES");
    const char *hip = getenv("HIP_VISIBLE_DEVICES");
    if ( (rocr != NULL && *rocr != '\0') ||
@@ -63,32 +63,32 @@ static int FDCBMojoUsesNvidiaRuntime(void) {
    }
 }
 
-static int FDCBMojoUsesDeviceMatrix(void) {
-   return FDCBMojoUsesNvidiaRuntime();
+static int MojoUsesDeviceMatrix(void) {
+   return MojoUsesNvidiaRuntime();
 }
 
-static void FDCBMojoMatrixReleaseArenas(void);
-static void FDCBMojoMatrixResetArenaReferences(void);
-static void FDCBMojoMatrixRetainDose(const struct STRPFLDDOSE *dose);
-static void FDCBMojoMatrixReleaseDose(const struct STRPFLDDOSE *dose);
-static void FDCBMojoMatrixDiscardUnreferencedArenas(void);
-static int FDCBMojoMatrixDirectView(
-   FDCBMatrixStorageV1 **storage, double **coefficients,
+static void MojoMatrixReleaseArenas(void);
+static void MojoMatrixResetArenaReferences(void);
+static void MojoMatrixRetainDose(const struct STRPFLDDOSE *dose);
+static void MojoMatrixReleaseDose(const struct STRPFLDDOSE *dose);
+static void MojoMatrixDiscardUnreferencedArenas(void);
+static int MojoMatrixDirectView(
+   MojoDeviceMatrix **storage, double **coefficients,
    uint16_t **point_indices, uint64_t *entry_count);
-static void FDCBMojoMatrixTransferDirectStorage(
-   FDCBMatrixStorageV1 *storage);
-static int FDCBMojoMatrixDirectViews(
-   uint32_t device_count, FDCBMatrixStorageV1 **storages,
+static void MojoMatrixTransferDirectStorage(
+   MojoDeviceMatrix *storage);
+static int MojoMatrixDirectViews(
+   uint32_t device_count, MojoDeviceMatrix **storages,
    double **coefficients, uint16_t **point_indices,
    uint64_t *entry_counts, uint64_t *voxel_offsets,
    uint64_t *voxel_counts);
-static int FDCBMojoMatrixDirectSlice(
+static int MojoMatrixDirectSlice(
    const struct STRPFLDDOSE *dose, int voxel,
    const struct STRPFLDDOSECORRSLICE *slice, uint64_t *offset,
    uint32_t *matrix_slice_index);
-static int FDCBMojoMatrixDoseDevice(const struct STRPFLDDOSE *dose);
+static int MojoMatrixDoseDevice(const struct STRPFLDDOSE *dose);
 
-static struct STRPOPTVOX *FDCBMojoScenarioVoxel(
+static struct STRPOPTVOX *MojoScenarioVoxel(
    struct STRPOPT *opt, int voxel, uint32_t scenario
 ) {
    if ( opt->ulFlag & TRPOPT_ROBUST )
@@ -96,8 +96,8 @@ static struct STRPOPTVOX *FDCBMojoScenarioVoxel(
    return opt->psOV + voxel;
 }
 
-static void FDCBMojoReleaseMergedDose(struct STRPFLDDOSE *dose) {
-   FDCBMojoMatrixReleaseDose(dose);
+static void MojoReleaseMergedDose(struct STRPFLDDOSE *dose) {
+   MojoMatrixReleaseDose(dose);
    free(dose->psFDC);
    free(dose->psMFDC);
    free(dose->psFDCS);
@@ -106,14 +106,14 @@ static void FDCBMojoReleaseMergedDose(struct STRPFLDDOSE *dose) {
    memset(dose, 0, sizeof(*dose));
 }
 
-static void *FDCBMojoTrimHeap(void *duration) {
+static void *MojoTrimHeap(void *duration) {
    double start = omp_get_wtime();
    malloc_trim(0);
    *(double *) duration = omp_get_wtime() - start;
    return NULL;
 }
 
-static int FDCBMojoCaptureRNG(FDCBProblemViewV1 *problem,
+static int MojoCaptureRNG(MojoOptimizationProblem *problem,
                               uint32_t state[31],
                               int32_t saved[32]) {
    char temporary[256] = {0};
@@ -134,14 +134,14 @@ static int FDCBMojoCaptureRNG(FDCBProblemViewV1 *problem,
    return 0;
 }
 
-static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
+static int TRPOptMojoRun(struct STRPOPT *opt,
                              struct STRPDOSECALC *dose_calc) {
    double start = omp_get_wtime();
    double phase;
-   FDCBProblemViewV1 problem;
-   FDCBProblemStorageV1 *storage = NULL;
-   FDCBWritableArraysV1 arrays;
-   FDCBResultV1 result;
+   MojoOptimizationProblem problem;
+   MojoProblemHandle *storage = NULL;
+   MojoProblemArrays arrays;
+   MojoOptimizationResult result;
    uint32_t rng_state[31];
    int32_t saved_rng[32];
    uint32_t *field_base = NULL;
@@ -153,11 +153,11 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    uint64_t slice_count = 0;
    uint64_t coefficient_count = 0;
    uint64_t unmerged_slices = 0;
-   FDCBMatrixStorageV1 *matrix_storage = NULL;
+   MojoDeviceMatrix *matrix_storage = NULL;
    double *matrix_coefficients = NULL;
    uint16_t *matrix_point_indices = NULL;
    uint64_t matrix_entry_count = 0;
-   FDCBMatrixStorageV1 *matrix_storages[3] = {NULL, NULL, NULL};
+   MojoDeviceMatrix *matrix_storages[3] = {NULL, NULL, NULL};
    double *matrix_coefficients_by_device[3] = {NULL, NULL, NULL};
    uint16_t *matrix_point_indices_by_device[3] = {NULL, NULL, NULL};
    uint64_t matrix_entry_counts[3] = {0, 0, 0};
@@ -169,35 +169,29 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    int direct_matrix = 0;
    int device_bootstrap = 0;
    int direct_pack_error = 0;
-   int pack_threads = FDCBMojoPackThreads();
-   int device_count = FDCBMojoDeviceCount();
+   int pack_threads = MojoPackThreads();
+   int device_count = MojoDeviceCount();
    int rc = -1;
 
    memset(&problem, 0, sizeof(problem));
    memset(&arrays, 0, sizeof(arrays));
    memset(&result, 0, sizeof(result));
    if ( device_count < 1 || device_count > 3 ) {
-      fprintf(stderr, "<E> Mojo FDCB supports one, two or three visible devices\n");
+      fprintf(stderr, "<E> Mojo optimizer supports one, two or three visible devices\n");
       goto done;
    }
-   gFDCBMojoFinalMinimumApplied = 0;
-   problem.version = FDCB_ABI_VERSION_V1;
-   problem.flags = FDCB_FLAG_INITIALIZE;
-   device_bootstrap = FDCBMojoUsesDeviceMatrix() || device_count > 1;
-   if ( device_bootstrap ) problem.flags |= FDCB_FLAG_DEVICE_BOOTSTRAP;
-   if ( opt->ulFlag & TRPOPT_BIO ) problem.flags |= FDCB_FLAG_BIOLOGICAL;
+   gMojoFinalMinimumApplied = 0;
+   problem.flags = MOJO_OPTIMIZER_FLAG_INITIALIZE;
+   device_bootstrap = MojoUsesDeviceMatrix() || device_count > 1;
+   if ( device_bootstrap ) problem.flags |= MOJO_OPTIMIZER_FLAG_DEVICE_BOOTSTRAP;
+   if ( opt->ulFlag & TRPOPT_BIO ) problem.flags |= MOJO_OPTIMIZER_FLAG_BIOLOGICAL;
    if ( opt->ulFlag & TRPOPT_ROBUST_INCLUDE_DMAX )
-      problem.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX;
-   problem.precision_mode = FDCB_PRECISION_REFERENCE;
+      problem.flags |= MOJO_OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX;
    problem.minimum_particle_policy = (opt->ulFlag & TRPOPT_COMPLEXMINPART) ?
-      FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG : FDCB_MIN_PARTICLE_SIMPLE;
-   problem.optimizer_algorithm = FDCB_OPTIMIZER_FDCB;
-   problem.dose_algorithm = FDCB_DOSE_MSDB;
-   problem.biology_model = (opt->ulFlag & TRPOPT_BIO) ?
-      FDCB_BIOLOGY_LOW_DOSE : FDCB_BIOLOGY_NONE;
-   problem.max_threads = 12;
+      MOJO_MINIMUM_PARTICLE_COMPLEX_HOST_RNG : MOJO_MINIMUM_PARTICLE_SIMPLE;
+   problem.dose_algorithm = MOJO_DOSE_ALGORITHM_MSDB;
    problem.rng_seed = opt->sVXR.iSeed;
-   if ( FDCBMojoCaptureRNG(&problem, rng_state, saved_rng) ) goto done;
+   if ( MojoCaptureRNG(&problem, rng_state, saved_rng) ) goto done;
    problem.field_count = (uint32_t) opt->nF;
    problem.scenario_count = (opt->ulFlag & TRPOPT_ROBUST) ?
       (uint32_t) opt->nRobustScenario : 1U;
@@ -250,7 +244,7 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
          uint64_t index = (uint64_t) voxel * problem.scenario_count + scenario;
          uint64_t local_slices = 0;
          uint64_t local_coefficients = 0;
-         struct STRPOPTVOX *source = FDCBMojoScenarioVoxel(
+         struct STRPOPTVOX *source = MojoScenarioVoxel(
             opt, voxel, scenario);
          for ( int field = 0; field < opt->nF; ++field )
             for ( int beam = 0; beam < source->psFD[field].nFDC; ++beam ) {
@@ -279,24 +273,24 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    problem.slice_count = slice_count;
    problem.coefficient_count = coefficient_count;
    fprintf(stderr,
-           "<TIME> FDCB Mojo pack count: %.6f sec; slices=%" PRIu64
+           "<TIME> Mojo optimizer pack count: %.6f sec; slices=%" PRIu64
            " coefficients=%" PRIu64 "\n",
            omp_get_wtime() - phase, slice_count, coefficient_count);
 
-   FDCBMojoMatrixResetArenaReferences();
+   MojoMatrixResetArenaReferences();
    for ( int voxel = 0; voxel < opt->nV; ++voxel )
       for ( uint32_t scenario = 0; scenario < problem.scenario_count;
             ++scenario ) {
-         struct STRPOPTVOX *source = FDCBMojoScenarioVoxel(
+         struct STRPOPTVOX *source = MojoScenarioVoxel(
             opt, voxel, scenario);
          for ( int field = 0; field < opt->nF; ++field )
-            FDCBMojoMatrixRetainDose(source->psFD + field);
+            MojoMatrixRetainDose(source->psFD + field);
       }
-   FDCBMojoMatrixDiscardUnreferencedArenas();
+   MojoMatrixDiscardUnreferencedArenas();
 
-   if ( FDCBMojoUsesDeviceMatrix() ) {
+   if ( MojoUsesDeviceMatrix() ) {
       if ( device_count == 1 ) {
-         if ( FDCBMojoMatrixDirectView(&matrix_storage, &matrix_coefficients,
+         if ( MojoMatrixDirectView(&matrix_storage, &matrix_coefficients,
                                       &matrix_point_indices,
                                       &matrix_entry_count) != 0 ) {
             fprintf(stderr,
@@ -304,7 +298,7 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
             goto done;
          }
          problem.coefficient_count = matrix_entry_count;
-      } else if ( FDCBMojoMatrixDirectViews(
+      } else if ( MojoMatrixDirectViews(
                      (uint32_t) device_count, matrix_storages,
                      matrix_coefficients_by_device,
                      matrix_point_indices_by_device, matrix_entry_counts,
@@ -319,10 +313,10 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
             int owner = -1;
             for ( uint32_t scenario = 0; scenario < problem.scenario_count;
                   ++scenario ) {
-               struct STRPOPTVOX *source = FDCBMojoScenarioVoxel(
+               struct STRPOPTVOX *source = MojoScenarioVoxel(
                   opt, voxel, scenario);
                for ( int field = 0; field < opt->nF; ++field ) {
-                  int device = FDCBMojoMatrixDoseDevice(source->psFD + field);
+                  int device = MojoMatrixDoseDevice(source->psFD + field);
                   if ( device < 0 || (owner >= 0 && device != owner) ) {
                      fprintf(stderr,
                              "<E> optimizer voxel spans Mojo matrix devices\n");
@@ -352,22 +346,22 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
 
    phase = omp_get_wtime();
    if ( direct_matrix && device_count == 1 )
-      rc = trip_fdcb_matrix_problem_storage_create_v1(
+      rc = trip_optimizer_create_problem_with_matrix(
          &problem, matrix_storage, &storage, &arrays);
    else if ( direct_matrix )
-      rc = trip_fdcb_matrix_problem_storage_create_accelerators_v1(
+      rc = trip_optimizer_create_problem_with_matrix_shards(
          &problem, matrix_storages, matrix_entry_counts,
          matrix_voxel_offsets, matrix_voxel_counts, (uint32_t) device_count,
          &storage, &arrays);
    else
-      rc = trip_fdcb_storage_create_v1(&problem, &storage, &arrays);
+      rc = trip_optimizer_create_problem(&problem, &storage, &arrays);
    if ( rc ) goto done;
    if ( direct_matrix && device_count == 1 )
-      FDCBMojoMatrixTransferDirectStorage(matrix_storage);
+      MojoMatrixTransferDirectStorage(matrix_storage);
    else if ( direct_matrix )
       for ( int device = 0; device < device_count; ++device )
-         FDCBMojoMatrixTransferDirectStorage(matrix_storages[device]);
-   fprintf(stderr, "<TIME> FDCB Mojo pack allocate: %.6f sec\n",
+         MojoMatrixTransferDirectStorage(matrix_storages[device]);
+   fprintf(stderr, "<TIME> Mojo optimizer pack allocate: %.6f sec\n",
            omp_get_wtime() - phase);
    memcpy(arrays.rng_state, rng_state, sizeof(rng_state));
 
@@ -377,7 +371,7 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
          for ( int beam = 0; beam < opt->psOF[field].nB; ++beam ) {
             uint32_t field_slice = field_base[field] + (uint32_t) beam;
             int count = opt->psOF[field].psORS[beam].nPnt;
-            FDCBFieldSliceV1 *destination = arrays.field_slices + field_slice;
+            MojoFieldSlice *destination = arrays.field_slices + field_slice;
             destination->field_index = (uint32_t) field;
             destination->beam_index = (uint32_t) beam;
             destination->point_offset = point;
@@ -414,7 +408,7 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
             struct STRPOPTVOX *nominal = opt->psOV + voxel;
             struct STRPRBE *rbe = (opt->ulFlag & TRPOPT_BIO) ?
                nominal->psVoi->psRN->svRBE + TRPRBE_MEAN : NULL;
-            FDCBVoxelV1 *voxel_out = arrays.voxels + voxel;
+            MojoOptimizationVoxel *voxel_out = arrays.voxels + voxel;
             voxel_out->prescribed_dose = nominal->dDoseP;
             voxel_out->dose_weight = nominal->dDoseW;
             voxel_out->dose_divisor = nominal->dDoseD;
@@ -437,11 +431,11 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
             for ( uint32_t scenario = 0; scenario < problem.scenario_count;
                   ++scenario ) {
                uint64_t state_index = voxel_out->scenario_offset + scenario;
-               struct STRPOPTVOX *source = FDCBMojoScenarioVoxel(
+               struct STRPOPTVOX *source = MojoScenarioVoxel(
                   opt, voxel, scenario);
-               FDCBVoxelScenarioV1 *scenario_out =
+               MojoRobustScenario *scenario_out =
                   arrays.voxel_scenarios + state_index;
-               FDCBScenarioStateV1 *state_out =
+               MojoScenarioState *state_out =
                   arrays.scenario_states + state_index;
                uint64_t slice = slice_offsets[state_index];
                uint64_t coefficient = coefficient_offsets[state_index];
@@ -459,13 +453,13 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
                      struct STRPFLDDOSECORRSLICE *input =
                         source->psFD[field].psFDCS + beam;
                      if ( input->sFDCP.nPnt == 0 ) continue;
-                     FDCBSliceV1 *output = arrays.slices + slice++;
+                     MojoDoseMatrixSlice *output = arrays.slices + slice++;
                      output->field_slice_index =
                         field_base[field] + (uint32_t) beam;
                      output->matrix_slice_index = 0;
                      if ( direct_matrix ) {
                         uint64_t direct_offset;
-                        if ( FDCBMojoMatrixDirectSlice(
+                        if ( MojoMatrixDirectSlice(
                                 source->psFD + field, voxel, input,
                                 &direct_offset,
                                 &output->matrix_slice_index) != 0 ) {
@@ -494,7 +488,7 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
                      coefficient += input->sFDCP.nPnt;
                   }
                   if ( unmerged_slices ) TRPFldDoseFree(source->psFD + field, 0);
-                  else FDCBMojoReleaseMergedDose(source->psFD + field);
+                  else MojoReleaseMergedDose(source->psFD + field);
                }
             }
          }
@@ -503,32 +497,32 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
             rc = -1;
             goto done;
          }
-         FDCBMojoMatrixDiscardUnreferencedArenas();
+         MojoMatrixDiscardUnreferencedArenas();
       }
    }
-   fprintf(stderr, "<TIME> FDCB Mojo pack matrices: %.6f sec\n",
+   fprintf(stderr, "<TIME> Mojo optimizer pack matrices: %.6f sec\n",
            omp_get_wtime() - phase);
-   FDCBMojoMatrixReleaseArenas();
-   if ( pthread_create(&trim_thread, NULL, FDCBMojoTrimHeap,
+   MojoMatrixReleaseArenas();
+   if ( pthread_create(&trim_thread, NULL, MojoTrimHeap,
                        &trim_seconds) == 0 )
       trim_started = 1;
    output_particles = calloc((size_t) point_count, sizeof(*output_particles));
    if ( output_particles == NULL ) goto done;
-   fprintf(stderr, "<I> FDCB Mojo accelerator devices=%d\n", device_count);
+   fprintf(stderr, "<I> Mojo optimizer devices=%d\n", device_count);
    phase = omp_get_wtime();
    if ( direct_matrix && device_count == 1 )
-      rc = trip_fdcb_matrix_problem_optimize_accelerator_v1(
+      rc = trip_optimizer_optimize_matrix_problem(
          storage, output_particles, point_count, &result);
    else if ( direct_matrix )
-      rc = trip_fdcb_matrix_problem_optimize_accelerators_v1(
+      rc = trip_optimizer_optimize_matrix_problem_shards(
          storage, output_particles, point_count, &result);
    else if ( device_count > 1 )
-      rc = trip_fdcb_storage_optimize_accelerators_v1(
+      rc = trip_optimizer_optimize_problem_on_devices(
          storage, output_particles, point_count, device_count, &result);
    else
-      rc = trip_fdcb_storage_optimize_accelerator_v1(
+      rc = trip_optimizer_optimize_problem_on_device(
          storage, output_particles, point_count, &result);
-   fprintf(stderr, "<TIME> FDCB Mojo optimize: %.6f sec\n",
+   fprintf(stderr, "<TIME> Mojo optimizer optimize: %.6f sec\n",
            omp_get_wtime() - phase);
    if ( rc ) goto done;
    {
@@ -544,10 +538,10 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
             }
    }
    opt->dChi2 = result.chi2;
-   gFDCBMojoFinalMinimumApplied =
-      (result.flags & FDCB_RESULT_FINAL_MIN_PARTICLES_APPLIED) != 0;
+   gMojoFinalMinimumApplied =
+      (result.flags & MOJO_OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED) != 0;
    fprintf(stderr,
-           "<I> FDCB Mojo: iterations=%" PRIu64 " chi2=%.17g residual=%.17g "
+           "<I> Mojo optimizer: iterations=%" PRIu64 " chi2=%.17g residual=%.17g "
            "deleted=%" PRIu64 " rng=%" PRIu64 " stop=%u\n",
            result.iterations, result.chi2, result.residual_percent,
            result.minimum_particle_deleted, result.random_draws,
@@ -557,7 +551,7 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
 done:
    if ( trim_started ) pthread_join(trim_thread, NULL);
    if ( trim_started )
-      fprintf(stderr, "<TIME> FDCB Mojo heap trim: %.6f sec (overlapped)\n",
+      fprintf(stderr, "<TIME> Mojo optimizer heap trim: %.6f sec (overlapped)\n",
               trim_seconds);
    free(field_base);
    free(slice_offsets);
@@ -565,13 +559,13 @@ done:
    free(output_particles);
    if ( storage ) {
       if ( direct_matrix && device_count == 1 )
-         trip_fdcb_matrix_problem_storage_destroy_v1(storage);
+         trip_optimizer_destroy_problem_with_matrix(storage);
       else if ( direct_matrix )
-         trip_fdcb_matrix_problem_storage_destroy_accelerators_v1(storage);
+         trip_optimizer_destroy_problem_with_matrix_shards(storage);
       else
-         trip_fdcb_storage_destroy_v1(storage);
+         trip_optimizer_destroy_problem(storage);
    }
-   fprintf(stderr, "<TIME> FDCB Mojo optimizer bridge: %.6f sec\n",
+   fprintf(stderr, "<TIME> Mojo optimizer bridge: %.6f sec\n",
            omp_get_wtime() - start);
    return rc;
 }

@@ -13,7 +13,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 -TARGET_LINK_LIBRARIES(TRiP98 TRiP98-64 ${CMD2KX_LIBRARIES} ${M2KX_LIBRARIES} ${U2KX_LIBRARIES} m Xt X11 dl OpenMP::OpenMP_C)
 +TARGET_LINK_LIBRARIES(TRiP98 TRiP98-64 ${CMD2KX_LIBRARIES} ${M2KX_LIBRARIES} ${U2KX_LIBRARIES} m dl OpenMP::OpenMP_C)
 +set(TRIP_MOJO_ROOT "" CACHE PATH "Path to trip-mojo")
-+set(TRIP_MOJO_LIBRARY "" CACHE FILEPATH "Path to libtrip_fdcb_mojo")
++set(TRIP_MOJO_LIBRARY "" CACHE FILEPATH "Path to libtrip_mojo")
 +if(NOT TRIP_MOJO_ROOT OR NOT TRIP_MOJO_LIBRARY)
 +  message(FATAL_ERROR "TRIP_MOJO_ROOT and TRIP_MOJO_LIBRARY are required")
 +endif()
@@ -99,8 +99,8 @@ diff --git a/trpopt.c b/trpopt.c
  #include "trpmlut.h"
  #include "trpcube.h"
  #include "trptomo.h"
-+#include "fdcb_mojo_optimizer_bridge.inc"
-+#include "fdcb_mojo_matrix_bridge.inc"
++#include "mojo_optimizer_bridge.inc"
++#include "mojo_matrix_bridge.inc"
  
  #define TRPOPTGRAD_TESTGRADINFO
  
@@ -110,7 +110,7 @@ diff --git a/trpopt.c b/trpopt.c
        }
 -      if(psOpt->ulFlag & TRPOPT_COMPLEXMINPART) {
 +      if((psOpt->ulFlag & TRPOPT_COMPLEXMINPART) &&
-+         !gFDCBMojoFinalMinimumApplied) {
++         !gMojoFinalMinimumApplied) {
           // eliminate any left-over points not meeting the min particle criterion
           for(int iF=0;iF < psOpt->nF; ++iF) {
              if(psOpt->psOF[iF].psF->psMasterField == NULL) {
@@ -123,7 +123,7 @@ diff --git a/trpopt.c b/trpopt.c
 -         } else {
 -            iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
 -         }
-+         iRC = TRPOptFDCBMojoRun(psOpt, psDC);
++         iRC = TRPOptMojoRun(psOpt, psDC);
           if ( iRC & CMDERR_MASK ) {
              sCE.iRC = iRC & ~CMDERR_MASK; goto gError;
           }
@@ -136,13 +136,13 @@ diff --git a/trpopt.c b/trpopt.c
 -   
 -   
 +
-+   if ( FDCBMojoUsesDeviceMatrix() ) {
++   if ( MojoUsesDeviceMatrix() ) {
 +      iRC = TRPOptDoseMatrixPhysMojoBuild(psOpt, psFB, psOV, nVoxel,
 +                                          nPreviousVoxels, iDoseAlg);
 +      if ( iRC & CMDERR_MASK ) {
 +         sCE.iRC = iRC & ~CMDERR_MASK; goto gError;
 +      }
-+      goto gFDCBMojoMatrixBuilt;
++      goto gMojoMatrixBuilt;
 +   }
 +
        /* multiple rsts in 4D optimization possible */
@@ -152,7 +152,7 @@ diff --git a/trpopt.c b/trpopt.c
           ++iF; 
        } //motion states
     }  //fields  
-+gFDCBMojoMatrixBuilt:
++gMojoMatrixBuilt:
  //                   fprintf(stderr,"%s line %d function %s\n",__FILE__,__LINE__,__func__);
    if(ulFlag & TRPOPT_DEBUG) {
       fprintf(stderr,"\n<D>MEMORY AFTER matrix setup\n");
@@ -160,7 +160,7 @@ diff --git a/trpopt.c b/trpopt.c
              }
           }
        }
-+      if ( !FDCBMojoUsesDeviceMatrix() ) {
++      if ( !MojoUsesDeviceMatrix() ) {
        for(int iOV=0; iOV < nVoxel; ++iOV) {
           for(int iF=0; iF < psOV[iOV].nF; ++iF) {
  //             if(psOpt->nRobustScenario) {

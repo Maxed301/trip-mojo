@@ -1,44 +1,49 @@
-"""Full host iteration controller shared by packed FDCB backends."""
+"""Host iteration controller shared by the CPU and device backends."""
 
 from std.math import sqrt
 from std.memory import ArcPointer, OpaquePointer
+from std.sys.info import size_of
 from std.time import perf_counter_ns
 
-from fdcb_accelerator import (
-    FDCBAccelerator,
-    fdcb_device_shards,
+from device_backend import (
+    DeviceWorkspace,
+    partition_voxels,
 )
-from fdcb_cpu import (
-    evaluate_validated_packed_biological_fdcb,
-    fdcb_exact_step,
+from cpu_backend import (
+    evaluate_biological_objective_validated,
+    compute_exact_step,
     packed_zero_gradient_direction,
 )
-from fdcb_min_particles import (
-    FDCBHostRNG,
-    FDCBMinimumParticleResult,
+from minimum_particles import (
+    HostRandomState,
+    MinimumParticleUpdate,
     apply_final_minimum_particle_limit,
     make_host_rng,
     update_with_minimum_particle_policy,
 )
-from fdcb_problem import (
-    FDCBProblemV1,
-    FDCB_FLAG_BIOLOGICAL,
-    FDCB_FLAG_DEVICE_BOOTSTRAP,
-    FDCB_FLAG_INITIALIZE,
-    evaluate_validated_packed_physical_fdcb,
+from optimization_problem import (
+    OptimizationProblem,
+    ScenarioState,
+    DoseMatrixSlice,
+    RobustScenario,
+    OptimizationVoxel,
+    OPTIMIZER_FLAG_BIOLOGICAL,
+    OPTIMIZER_FLAG_DEVICE_BOOTSTRAP,
+    OPTIMIZER_FLAG_INITIALIZE,
+    evaluate_physical_objective_validated,
 )
 from reference_math import reference_exp
 
 
-comptime FDCB_STOP_MAX_ITERATIONS = UInt32(1)
-comptime FDCB_STOP_CHI2_NOT_DECREASING = UInt32(2)
-comptime FDCB_STOP_CHI_SQUARE_LIMIT = UInt32(3)
-comptime FDCB_STOP_EPSILON = UInt32(4)
-comptime FDCB_STOP_VECTOR_CHANGE = UInt32(5)
+comptime STOP_MAX_ITERATIONS = UInt32(1)
+comptime STOP_CHI2_NOT_DECREASING = UInt32(2)
+comptime STOP_CHI_SQUARE_LIMIT = UInt32(3)
+comptime STOP_EPSILON = UInt32(4)
+comptime STOP_VECTOR_CHANGE = UInt32(5)
 
 
 @fieldwise_init
-struct FDCBIterationEvaluation(Copyable, Movable):
+struct IterationEvaluation(Copyable, Movable):
     var dose_min: List[Float64]
     var dose_max: List[Float64]
     var min_scenario: List[Int32]
@@ -55,7 +60,7 @@ struct FDCBIterationEvaluation(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBOptimizationResult(Copyable, Movable):
+struct OptimizationResult(Copyable, Movable):
     var particles: List[Float64]
     var gradient: List[Float64]
     var direction: List[Float64]
@@ -72,26 +77,26 @@ struct FDCBOptimizationResult(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBCandidate(Copyable, Movable):
+struct StepCandidate(Copyable, Movable):
     var particles: List[Float64]
-    var minimum_particles: FDCBMinimumParticleResult
+    var minimum_particles: MinimumParticleUpdate
 
 
-def evaluate_packed_iteration(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> FDCBIterationEvaluation:
+def evaluate_objective(
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> IterationEvaluation:
     problem.validate()
-    return evaluate_validated_packed_iteration(problem, particles)
+    return evaluate_objective_validated(problem, particles)
 
 
-def evaluate_validated_packed_iteration(
-    problem: FDCBProblemV1, particles: List[Float64]
-) raises -> FDCBIterationEvaluation:
-    if (problem.settings.flags & FDCB_FLAG_BIOLOGICAL) != UInt32(0):
-        var evaluation = evaluate_validated_packed_biological_fdcb(
+def evaluate_objective_validated(
+    problem: OptimizationProblem, particles: List[Float64]
+) raises -> IterationEvaluation:
+    if (problem.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0):
+        var evaluation = evaluate_biological_objective_validated(
             problem, particles
         )
-        return FDCBIterationEvaluation(
+        return IterationEvaluation(
             evaluation.dose_min.copy(),
             evaluation.dose_max.copy(),
             evaluation.min_scenario.copy(),
@@ -101,8 +106,8 @@ def evaluate_validated_packed_iteration(
             evaluation.dose_p_weighted_avg2,
             evaluation.gradient_norm,
         )
-    var evaluation = evaluate_validated_packed_physical_fdcb(problem, particles)
-    return FDCBIterationEvaluation(
+    var evaluation = evaluate_physical_objective_validated(problem, particles)
+    return IterationEvaluation(
         evaluation.dose_min.copy(),
         evaluation.dose_max.copy(),
         evaluation.min_scenario.copy(),
@@ -114,47 +119,47 @@ def evaluate_validated_packed_iteration(
     )
 
 
-trait FDCBEvaluator:
+trait ObjectiveEvaluator:
     def initial_direction(
-        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+        mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
         ...
 
     def evaluate(
-        mut self, problem: FDCBProblemV1, particles: List[Float64]
-    ) raises -> FDCBIterationEvaluation:
+        mut self, problem: OptimizationProblem, particles: List[Float64]
+    ) raises -> IterationEvaluation:
         ...
 
     def exact_step(
         mut self,
-        problem: FDCBProblemV1,
-        evaluation: FDCBIterationEvaluation,
+        problem: OptimizationProblem,
+        evaluation: IterationEvaluation,
         direction: List[Float64],
     ) raises -> Float64:
         ...
 
 
-struct FDCBCPUEvaluator(FDCBEvaluator):
+struct CpuEvaluator(ObjectiveEvaluator):
     def __init__(out self):
         pass
 
     def evaluate(
-        mut self, problem: FDCBProblemV1, particles: List[Float64]
-    ) raises -> FDCBIterationEvaluation:
-        return evaluate_validated_packed_iteration(problem, particles)
+        mut self, problem: OptimizationProblem, particles: List[Float64]
+    ) raises -> IterationEvaluation:
+        return evaluate_objective_validated(problem, particles)
 
     def initial_direction(
-        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+        mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
         return initial_direction(problem, gradient)
 
     def exact_step(
         mut self,
-        problem: FDCBProblemV1,
-        evaluation: FDCBIterationEvaluation,
+        problem: OptimizationProblem,
+        evaluation: IterationEvaluation,
         direction: List[Float64],
     ) raises -> Float64:
-        return fdcb_exact_step(
+        return compute_exact_step(
             problem,
             evaluation.dose_min,
             evaluation.dose_max,
@@ -164,30 +169,30 @@ struct FDCBCPUEvaluator(FDCBEvaluator):
         )
 
 
-struct FDCBDeviceEvaluator(FDCBEvaluator, Movable):
-    var accelerator: FDCBAccelerator
+struct DeviceEvaluator(Movable, ObjectiveEvaluator):
+    var workspace: DeviceWorkspace
 
-    def __init__(out self, problem: FDCBProblemV1) raises:
-        self.accelerator = FDCBAccelerator(problem)
+    def __init__(out self, problem: OptimizationProblem) raises:
+        self.workspace = DeviceWorkspace(problem)
 
     def __init__[
         origin: Origin
     ](
         out self,
-        problem: FDCBProblemV1,
+        problem: OptimizationProblem,
         matrix_storage: OpaquePointer[origin],
         coefficient_count: Int,
     ) raises:
-        self.accelerator = FDCBAccelerator(
+        self.workspace = DeviceWorkspace(
             problem, matrix_storage, coefficient_count
         )
 
     def evaluate(
-        mut self, problem: FDCBProblemV1, particles: List[Float64]
-    ) raises -> FDCBIterationEvaluation:
+        mut self, problem: OptimizationProblem, particles: List[Float64]
+    ) raises -> IterationEvaluation:
         _ = problem
-        var result = self.accelerator.evaluation(particles, False)
-        return FDCBIterationEvaluation(
+        var result = self.workspace.evaluation(particles, False)
+        return IterationEvaluation(
             result.dose_min.copy(),
             result.dose_max.copy(),
             result.min_scenario.copy(),
@@ -199,35 +204,39 @@ struct FDCBDeviceEvaluator(FDCBEvaluator, Movable):
         )
 
     def initial_direction(
-        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+        mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
-        if (problem.settings.flags & FDCB_FLAG_DEVICE_BOOTSTRAP) != UInt32(0):
-            return self.accelerator.zero_gradient_direction()
+        if (problem.settings.flags & OPTIMIZER_FLAG_DEVICE_BOOTSTRAP) != UInt32(
+            0
+        ):
+            return self.workspace.zero_gradient_direction()
         return initial_direction(problem, gradient)
 
     def exact_step(
         mut self,
-        problem: FDCBProblemV1,
-        evaluation: FDCBIterationEvaluation,
+        problem: OptimizationProblem,
+        evaluation: IterationEvaluation,
         direction: List[Float64],
     ) raises -> Float64:
         _ = problem
         _ = evaluation
-        return self.accelerator.exact_step(direction)
+        return self.workspace.exact_step(direction)
 
 
-struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
-    var accelerators: List[ArcPointer[FDCBAccelerator]]
+struct MultiDeviceEvaluator(Movable, ObjectiveEvaluator):
+    var workspaces: List[ArcPointer[DeviceWorkspace]]
 
-    def __init__(out self, problem: FDCBProblemV1, device_count: Int) raises:
+    def __init__(
+        out self, problem: OptimizationProblem, device_count: Int
+    ) raises:
         problem.validate()
-        var shards = fdcb_device_shards(problem, device_count)
-        var accelerators = List[ArcPointer[FDCBAccelerator]]()
-        accelerators.reserve(device_count)
+        var shards = partition_voxels(problem, device_count)
+        var workspaces = List[ArcPointer[DeviceWorkspace]]()
+        workspaces.reserve(device_count)
         for device in range(device_count):
-            accelerators.append(
+            workspaces.append(
                 ArcPointer(
-                    FDCBAccelerator(
+                    DeviceWorkspace(
                         problem,
                         device,
                         shards[device].voxel_offset,
@@ -238,14 +247,14 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
                 )
             )
         for device in range(device_count):
-            accelerators[device][].synchronize()
-        self.accelerators = accelerators^
+            workspaces[device][].synchronize()
+        self.workspaces = workspaces^
 
     def __init__[
         origin: Origin
     ](
         out self,
-        problem: FDCBProblemV1,
+        problem: OptimizationProblem,
         matrix_storages: List[OpaquePointer[origin]],
         coefficient_counts: List[Int],
         voxel_offsets: List[Int],
@@ -259,7 +268,7 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
             or len(voxel_offsets) != device_count
             or len(voxel_counts) != device_count
         ):
-            raise Error("invalid external multi-device FDCB matrix shards")
+            raise Error("invalid external multi-device dose matrix shards")
         var maximum_count = 0
         var expected_voxel = 0
         for device in range(device_count):
@@ -268,19 +277,19 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
                 or voxel_offsets[device] != expected_voxel
                 or voxel_counts[device] < 1
             ):
-                raise Error("external FDCB matrix shards are not contiguous")
+                raise Error("external dose matrix shards are not contiguous")
             expected_voxel += voxel_counts[device]
             if coefficient_counts[device] > maximum_count:
                 maximum_count = coefficient_counts[device]
         if expected_voxel != len(problem.voxels):
-            raise Error("external FDCB matrix shards do not cover all voxels")
+            raise Error("external dose matrix shards do not cover all voxels")
         problem.validate(external_coefficient_count=UInt64(maximum_count))
-        var accelerators = List[ArcPointer[FDCBAccelerator]]()
-        accelerators.reserve(device_count)
+        var workspaces = List[ArcPointer[DeviceWorkspace]]()
+        workspaces.reserve(device_count)
         for device in range(device_count):
-            accelerators.append(
+            workspaces.append(
                 ArcPointer(
-                    FDCBAccelerator(
+                    DeviceWorkspace(
                         problem,
                         matrix_storages[device],
                         coefficient_counts[device],
@@ -291,22 +300,22 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
                     )
                 )
             )
-        self.accelerators = accelerators^
+        self.workspaces = workspaces^
 
     def evaluate(
-        mut self, problem: FDCBProblemV1, particles: List[Float64]
-    ) raises -> FDCBIterationEvaluation:
+        mut self, problem: OptimizationProblem, particles: List[Float64]
+    ) raises -> IterationEvaluation:
         _ = problem
-        for device in range(len(self.accelerators)):
-            self.accelerators[device][].enqueue_evaluation_front(particles)
-        for device in range(len(self.accelerators)):
-            self.accelerators[device][].enqueue_evaluation_backprojection()
-        var first = self.accelerators[0][].collect_evaluation(False)
+        for device in range(len(self.workspaces)):
+            self.workspaces[device][].enqueue_evaluation_front(particles)
+        for device in range(len(self.workspaces)):
+            self.workspaces[device][].enqueue_evaluation_backprojection()
+        var first = self.workspaces[0][].collect_evaluation(False)
         var gradient = first.gradient.copy()
         var chi2 = first.chi2()
         var weighted = first.weighted_dose2()
-        for device in range(1, len(self.accelerators)):
-            var partial = self.accelerators[device][].collect_evaluation(False)
+        for device in range(1, len(self.workspaces)):
+            var partial = self.workspaces[device][].collect_evaluation(False)
             chi2 += partial.chi2()
             weighted += partial.weighted_dose2()
             for point in range(len(gradient)):
@@ -314,7 +323,7 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
         var norm2 = 0.0
         for value in gradient:
             norm2 += value * value
-        return FDCBIterationEvaluation(
+        return IterationEvaluation(
             List[Float64](),
             List[Float64](),
             List[Int32](),
@@ -326,31 +335,33 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
         )
 
     def initial_direction(
-        mut self, problem: FDCBProblemV1, gradient: List[Float64]
+        mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
-        if (problem.settings.flags & FDCB_FLAG_DEVICE_BOOTSTRAP) == UInt32(0):
+        if (problem.settings.flags & OPTIMIZER_FLAG_DEVICE_BOOTSTRAP) == UInt32(
+            0
+        ):
             return initial_direction(problem, gradient)
-        var direction = self.accelerators[0][].zero_gradient_direction()
-        for device in range(1, len(self.accelerators)):
-            var partial = self.accelerators[device][].zero_gradient_direction()
+        var direction = self.workspaces[0][].zero_gradient_direction()
+        for device in range(1, len(self.workspaces)):
+            var partial = self.workspaces[device][].zero_gradient_direction()
             for point in range(len(direction)):
                 direction[point] += partial[point]
         return direction^
 
     def exact_step(
         mut self,
-        problem: FDCBProblemV1,
-        evaluation: FDCBIterationEvaluation,
+        problem: OptimizationProblem,
+        evaluation: IterationEvaluation,
         direction: List[Float64],
     ) raises -> Float64:
         _ = problem
         _ = evaluation
-        for device in range(len(self.accelerators)):
-            self.accelerators[device][].enqueue_exact_step(direction)
+        for device in range(len(self.workspaces)):
+            self.workspaces[device][].enqueue_exact_step(direction)
         var numerator = 0.0
         var denominator = 0.0
-        for device in range(len(self.accelerators)):
-            var partial = self.accelerators[device][].collect_exact_step_terms()
+        for device in range(len(self.workspaces)):
+            var partial = self.workspaces[device][].collect_exact_step_terms()
             numerator += partial.numerator
             denominator += partial.denominator
         if denominator == 0.0:
@@ -358,37 +369,37 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
         return numerator / denominator
 
 
-def optimize_packed_fdcb(
-    problem: FDCBProblemV1,
-) raises -> FDCBOptimizationResult:
+def optimize_on_cpu(
+    mut problem: OptimizationProblem,
+) raises -> OptimizationResult:
     problem.validate()
-    var evaluator = FDCBCPUEvaluator()
-    return optimize_packed_fdcb_with_evaluator(problem, evaluator)
+    var evaluator = CpuEvaluator()
+    return run_optimization(problem, evaluator)
 
 
-def optimize_packed_fdcb_accelerator(
-    problem: FDCBProblemV1,
-) raises -> FDCBOptimizationResult:
-    var evaluator = FDCBDeviceEvaluator(problem)
-    return optimize_packed_fdcb_with_evaluator(problem, evaluator)
+def optimize_on_device(
+    mut problem: OptimizationProblem,
+) raises -> OptimizationResult:
+    var evaluator = DeviceEvaluator(problem)
+    return run_optimization(problem, evaluator)
 
 
-def optimize_packed_fdcb_two_accelerators(
-    problem: FDCBProblemV1,
-) raises -> FDCBOptimizationResult:
-    return optimize_packed_fdcb_accelerators(problem, 2)
+def optimize_on_two_devices(
+    mut problem: OptimizationProblem,
+) raises -> OptimizationResult:
+    return optimize_on_devices(problem, 2)
 
 
-def optimize_packed_fdcb_accelerators(
-    problem: FDCBProblemV1, device_count: Int
-) raises -> FDCBOptimizationResult:
+def optimize_on_devices(
+    mut problem: OptimizationProblem, device_count: Int
+) raises -> OptimizationResult:
     var start_ns = perf_counter_ns()
-    var evaluator = FDCBMultiDeviceEvaluator(problem, device_count)
+    var evaluator = MultiDeviceEvaluator(problem, device_count)
     var setup_ns = perf_counter_ns()
-    var result = optimize_packed_fdcb_with_evaluator(problem, evaluator)
+    var result = run_optimization(problem, evaluator)
     var done_ns = perf_counter_ns()
     print(
-        "<TIME> FDCB Mojo multi setup: ",
+        "<TIME> Mojo optimizer multi setup: ",
         Float64(setup_ns - start_ns) * 1.0e-9,
         " sec iterations: ",
         Float64(done_ns - setup_ns) * 1.0e-9,
@@ -398,17 +409,17 @@ def optimize_packed_fdcb_accelerators(
     return result^
 
 
-def optimize_packed_fdcb_accelerator_matrices[
+def optimize_with_matrix_shards[
     origin: Origin
 ](
-    problem: FDCBProblemV1,
+    mut problem: OptimizationProblem,
     matrix_storages: List[OpaquePointer[origin]],
     coefficient_counts: List[Int],
     voxel_offsets: List[Int],
     voxel_counts: List[Int],
-) raises -> FDCBOptimizationResult:
+) raises -> OptimizationResult:
     var start_ns = perf_counter_ns()
-    var evaluator = FDCBMultiDeviceEvaluator(
+    var evaluator = MultiDeviceEvaluator(
         problem,
         matrix_storages,
         coefficient_counts,
@@ -416,10 +427,12 @@ def optimize_packed_fdcb_accelerator_matrices[
         voxel_counts,
     )
     var setup_ns = perf_counter_ns()
-    var result = optimize_packed_fdcb_with_evaluator(problem, evaluator)
+    var result = run_optimization(
+        problem, evaluator, release_host_problem_arrays=True
+    )
     var done_ns = perf_counter_ns()
     print(
-        "<TIME> FDCB Mojo multi-direct setup: ",
+        "<TIME> Mojo optimizer multi-direct setup: ",
         Float64(setup_ns - start_ns) * 1.0e-9,
         " sec iterations: ",
         Float64(done_ns - setup_ns) * 1.0e-9,
@@ -429,31 +442,45 @@ def optimize_packed_fdcb_accelerator_matrices[
     return result^
 
 
-def optimize_packed_fdcb_accelerator_matrix[
+def optimize_with_matrix[
     origin: Origin
 ](
-    problem: FDCBProblemV1,
+    mut problem: OptimizationProblem,
     matrix_storage: OpaquePointer[origin],
     coefficient_count: Int,
-) raises -> FDCBOptimizationResult:
-    var evaluator = FDCBDeviceEvaluator(
-        problem, matrix_storage, coefficient_count
+) raises -> OptimizationResult:
+    var evaluator = DeviceEvaluator(problem, matrix_storage, coefficient_count)
+    return run_optimization(
+        problem, evaluator, release_host_problem_arrays=True
     )
-    return optimize_packed_fdcb_with_evaluator(problem, evaluator)
 
 
-def optimize_packed_fdcb_with_evaluator[
-    Evaluator: FDCBEvaluator
+def run_optimization[
+    Evaluator: ObjectiveEvaluator
 ](
-    problem: FDCBProblemV1, mut evaluator: Evaluator
-) raises -> FDCBOptimizationResult:
+    mut problem: OptimizationProblem,
+    mut evaluator: Evaluator,
+    release_host_problem_arrays: Bool = False,
+) raises -> OptimizationResult:
     if problem.settings.max_iterations == UInt32(0):
-        raise Error("packed FDCB optimizer requires max_iterations > 0")
+        raise Error("packed optimizer requires max_iterations > 0")
     var particles = problem.particles.copy()
     var evaluation = evaluator.evaluate(problem, particles)
     var direction = evaluator.initial_direction(problem, evaluation.gradient)
+    if release_host_problem_arrays:
+        var released_bytes = (
+            len(problem.voxels) * size_of[OptimizationVoxel]()
+            + len(problem.voxel_scenarios) * size_of[RobustScenario]()
+            + len(problem.scenario_states) * size_of[ScenarioState]()
+            + len(problem.slices) * size_of[DoseMatrixSlice]()
+        )
+        problem.voxels = List[OptimizationVoxel]()
+        problem.voxel_scenarios = List[RobustScenario]()
+        problem.scenario_states = List[ScenarioState]()
+        problem.slices = List[DoseMatrixSlice]()
+        print("<I> optimizer released-host-bytes=", released_bytes, sep="")
     var active_gradient_norm = evaluation.gradient_norm
-    if (problem.settings.flags & FDCB_FLAG_INITIALIZE) != UInt32(0):
+    if (problem.settings.flags & OPTIMIZER_FLAG_INITIALIZE) != UInt32(0):
         active_gradient_norm = vector_norm(direction)
     var rng = make_host_rng(problem)
     var total_iteration = problem.settings.total_iterations
@@ -464,10 +491,10 @@ def optimize_packed_fdcb_with_evaluator[
     var relative_change = 0.0
     var last_factor = 0.0
     var last_exact_step = 0.0
-    var stop_reason = FDCB_STOP_MAX_ITERATIONS
-    var initialize = (problem.settings.flags & FDCB_FLAG_INITIALIZE) != UInt32(
-        0
-    )
+    var stop_reason = STOP_MAX_ITERATIONS
+    var initialize = (
+        problem.settings.flags & OPTIMIZER_FLAG_INITIALIZE
+    ) != UInt32(0)
     var update_count = Int(problem.settings.max_iterations)
     if initialize:
         update_count += 1
@@ -492,7 +519,7 @@ def optimize_packed_fdcb_with_evaluator[
         total_iteration += UInt32(1)
 
         var factor = default_step_factor(problem)
-        if (problem.settings.flags & FDCB_FLAG_BIOLOGICAL) != UInt32(
+        if (problem.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(
             0
         ) and problem.settings.configured_step_factor <= 0.0:
             var interval = problem.settings.step_factor_iterations
@@ -559,7 +586,7 @@ def optimize_packed_fdcb_with_evaluator[
             and iteration >= Int(problem.settings.grace_iterations)
             and relative_change <= 0.0
         ):
-            stop_reason = FDCB_STOP_CHI2_NOT_DECREASING
+            stop_reason = STOP_CHI2_NOT_DECREASING
             break
 
         particles = candidate_particles^
@@ -583,23 +610,23 @@ def optimize_packed_fdcb_with_evaluator[
             and evaluation.residual_percent()
             <= problem.settings.chi_square_limit
         ):
-            stop_reason = FDCB_STOP_CHI_SQUARE_LIMIT
+            stop_reason = STOP_CHI_SQUARE_LIMIT
             break
         if (
             iteration >= Int(problem.settings.grace_iterations) - 1
             and relative_change < problem.settings.epsilon
         ):
-            stop_reason = FDCB_STOP_EPSILON
+            stop_reason = STOP_EPSILON
             break
         if (
             iteration >= Int(problem.settings.grace_iterations) - 1
             and iteration > 0
             and vector_change < problem.settings.epsilon * 1.0e-3
         ):
-            stop_reason = FDCB_STOP_VECTOR_CHANGE
+            stop_reason = STOP_VECTOR_CHANGE
             break
         if iteration == Int(problem.settings.max_iterations) - 1:
-            stop_reason = FDCB_STOP_MAX_ITERATIONS
+            stop_reason = STOP_MAX_ITERATIONS
             break
         direction = fletcher_reeves_direction(
             problem, evaluation.gradient, old_gradient, direction
@@ -610,7 +637,7 @@ def optimize_packed_fdcb_with_evaluator[
         deleted += final_minimum.deleted
         evaluation = evaluator.evaluate(problem, particles)
 
-    return FDCBOptimizationResult(
+    return OptimizationResult(
         particles^,
         evaluation.gradient.copy(),
         direction^,
@@ -628,12 +655,12 @@ def optimize_packed_fdcb_with_evaluator[
 
 
 def initial_direction(
-    problem: FDCBProblemV1, gradient: List[Float64]
+    problem: OptimizationProblem, gradient: List[Float64]
 ) raises -> List[Float64]:
     for value in problem.initial_direction:
         if value != 0.0:
             return problem.initial_direction.copy()
-    if (problem.settings.flags & FDCB_FLAG_INITIALIZE) != UInt32(0):
+    if (problem.settings.flags & OPTIMIZER_FLAG_INITIALIZE) != UInt32(0):
         return packed_zero_gradient_direction(problem)
     return gradient.copy()
 
@@ -645,25 +672,25 @@ def vector_norm(values: List[Float64]) -> Float64:
     return sqrt(total)
 
 
-def default_step_factor(problem: FDCBProblemV1) -> Float64:
+def default_step_factor(problem: OptimizationProblem) -> Float64:
     if problem.settings.configured_step_factor > 0.0:
         return problem.settings.configured_step_factor
-    if (problem.settings.flags & FDCB_FLAG_BIOLOGICAL) != UInt32(0):
+    if (problem.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0):
         return 1.0
     return 0.5
 
 
 def select_biological_step_factor[
-    Evaluator: FDCBEvaluator
+    Evaluator: ObjectiveEvaluator
 ](
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     mut evaluator: Evaluator,
     particles: List[Float64],
     direction: List[Float64],
     exact_step: Float64,
     gradient_limit: Float64,
     iteration_probability: Float64,
-    mut rng: FDCBHostRNG,
+    mut rng: HostRandomState,
     mut deleted: UInt64,
     mut random_draws: UInt64,
 ) raises -> Float64:
@@ -691,15 +718,15 @@ def select_biological_step_factor[
 
 
 def update_candidate(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     particles: List[Float64],
     direction: List[Float64],
     exact_step: Float64,
     factor: Float64,
     gradient_limit: Float64,
     iteration_probability: Float64,
-    mut rng: FDCBHostRNG,
-) raises -> FDCBCandidate:
+    mut rng: HostRandomState,
+) raises -> StepCandidate:
     var update = update_with_minimum_particle_policy(
         problem,
         particles,
@@ -709,13 +736,13 @@ def update_candidate(
         iteration_probability,
         rng,
     )
-    return FDCBCandidate(
+    return StepCandidate(
         update.particles.copy(), update.minimum_particles.copy()
     )
 
 
 def fletcher_reeves_direction(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     gradient: List[Float64],
     previous_gradient: List[Float64],
     previous_direction: List[Float64],
@@ -743,7 +770,7 @@ def fletcher_reeves_direction(
     return direction^
 
 
-def count_active_points(problem: FDCBProblemV1) -> Int:
+def count_active_points(problem: OptimizationProblem) -> Int:
     var count = 0
     for active in problem.point_active:
         if active != UInt8(0):
@@ -752,7 +779,7 @@ def count_active_points(problem: FDCBProblemV1) -> Int:
 
 
 def rms_vector_change(
-    problem: FDCBProblemV1,
+    problem: OptimizationProblem,
     previous: List[Float64],
     current: List[Float64],
 ) -> Float64:

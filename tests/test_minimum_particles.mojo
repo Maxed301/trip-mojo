@@ -1,17 +1,17 @@
 from std.testing import assert_equal, assert_true
 
-from fdcb_min_particles import (
-    FDCBHostRNG,
+from minimum_particles import (
+    HostRandomState,
     apply_final_minimum_particle_limit,
     apply_minimum_particle_policy,
     update_with_minimum_particle_policy,
 )
-from fdcb_problem import FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
-from test_fdcb_problem import build_problem
+from optimization_problem import MINIMUM_PARTICLE_COMPLEX_HOST_RNG
+from test_optimization_problem import build_problem
 
 
 def test_reference_rng_sequence() raises:
-    var rng = FDCBHostRNG(UInt64(1))
+    var rng = HostRandomState(UInt64(1))
     assert_equal(rng.next(), UInt32(1804289383))
     assert_equal(rng.next(), UInt32(846930886))
     assert_equal(rng.next(), UInt32(1681692777))
@@ -21,14 +21,14 @@ def test_reference_rng_sequence() raises:
 
 def test_complex_policy_is_seeded_and_repeatable() raises:
     var problem = build_problem()
-    problem.minimum_particle_policy.kind = FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+    problem.minimum_particle_policy.kind = MINIMUM_PARTICLE_COMPLEX_HOST_RNG
     problem.field_slices[0].minimum_particles = 100.0
     problem.field_slices[0].raster_stride = UInt32(2)
     var first = [25.0, 50.0]
     var second = first.copy()
     var direction = [1.0, -1.0]
-    var rng1 = FDCBHostRNG(problem.minimum_particle_policy.seed)
-    var rng2 = FDCBHostRNG(problem.minimum_particle_policy.seed)
+    var rng1 = HostRandomState(problem.minimum_particle_policy.seed)
+    var rng2 = HostRandomState(problem.minimum_particle_policy.seed)
     var result1 = apply_minimum_particle_policy(
         problem, first, direction, 1.0, 1.0, rng1
     )
@@ -43,10 +43,10 @@ def test_complex_policy_is_seeded_and_repeatable() raises:
 
 
 def test_rng_state_restores_exact_position() raises:
-    var source = FDCBHostRNG(UInt64(101))
+    var source = HostRandomState(UInt64(101))
     for _ in range(17):
         _ = source.next()
-    var restored = FDCBHostRNG(
+    var restored = HostRandomState(
         source.state.copy(), UInt32(source.front), UInt32(source.rear)
     )
     for _ in range(20):
@@ -59,7 +59,7 @@ def test_update_preserves_trip_point_order() raises:
     problem.field_slices[0].raster_stride = UInt32(2)
     var zero_state = List[UInt32]()
     zero_state.resize(31, UInt32(0))
-    var rng = FDCBHostRNG(zero_state^, UInt32(3), UInt32(0))
+    var rng = HostRandomState(zero_state^, UInt32(3), UInt32(0))
     var update = update_with_minimum_particle_policy(
         problem, [50.0, 120.0], [0.0, -1.0], 0.0, 1.0, 1.0, rng
     )
@@ -69,7 +69,7 @@ def test_update_preserves_trip_point_order() raises:
 
 def test_final_complex_limit_matches_trip_threshold() raises:
     var problem = build_problem()
-    problem.minimum_particle_policy.kind = FDCB_MIN_PARTICLE_COMPLEX_HOST_RNG
+    problem.minimum_particle_policy.kind = MINIMUM_PARTICLE_COMPLEX_HOST_RNG
     problem.field_slices[0].minimum_particles = 100.0
     problem.point_active = [UInt8(1), UInt8(1)]
     var particles = [79.0, 80.0]

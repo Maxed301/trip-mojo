@@ -4,7 +4,7 @@ from sparse_optimizer import SparseDoseMatrix
 
 
 @fieldwise_init
-struct FDCBVoxelObjective(Copyable, Movable):
+struct VoxelObjective(Copyable, Movable):
     var dose_p: Float64
     var dose_w: Float64
     var dose_d: Float64
@@ -13,12 +13,12 @@ struct FDCBVoxelObjective(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBScenarioSet(Copyable, Movable):
+struct PhysicalScenarioSet(Copyable, Movable):
     var matrices: List[SparseDoseMatrix]
 
 
 @fieldwise_init
-struct FDCBEvaluation(Copyable, Movable):
+struct RobustEvaluation(Copyable, Movable):
     var dose_by_scenario: List[List[Float64]]
     var dose_a: List[Float64]
     var dose_min: List[Float64]
@@ -37,9 +37,9 @@ struct FDCBEvaluation(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBStepResult(Copyable, Movable):
+struct StepResult(Copyable, Movable):
     var particles: List[Float64]
-    var evaluation: FDCBEvaluation
+    var evaluation: RobustEvaluation
     var dmy: Float64
 
 
@@ -57,7 +57,7 @@ struct BioLQParams(Copyable, Movable):
 
 
 @fieldwise_init
-struct BioFDCBEntry(Copyable, Movable):
+struct BiologicalMatrixEntry(Copyable, Movable):
     var voxel: Int
     var spot: Int
     var g: Float64
@@ -69,15 +69,15 @@ struct BioFDCBEntry(Copyable, Movable):
 
 
 @fieldwise_init
-struct BioFDCBMatrix(Copyable, Movable):
+struct BiologicalDoseMatrix(Copyable, Movable):
     var voxel_count: Int
     var spot_count: Int
-    var entries: List[BioFDCBEntry]
+    var entries: List[BiologicalMatrixEntry]
 
 
 @fieldwise_init
-struct BioFDCBScenarioSet(Copyable, Movable):
-    var matrices: List[BioFDCBMatrix]
+struct BiologicalScenarioSet(Copyable, Movable):
+    var matrices: List[BiologicalDoseMatrix]
 
 
 @fieldwise_init
@@ -93,7 +93,7 @@ struct BioScenarioDose(Copyable, Movable):
 
 
 @fieldwise_init
-struct BioFDCBEvaluation(Copyable, Movable):
+struct BioRobustEvaluation(Copyable, Movable):
     var scenario_doses: List[List[BioScenarioDose]]
     var dose_a: List[Float64]
     var dose_min: List[Float64]
@@ -106,17 +106,19 @@ struct BioFDCBEvaluation(Copyable, Movable):
     var grad_norm: Float64
 
 
-def evaluate_robust_physical_fdcb(
-    scenarios: FDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def evaluate_robust_physical(
+    scenarios: PhysicalScenarioSet,
+    objectives: List[VoxelObjective],
     particles: List[Float64],
     include_dmax: Bool = False,
-) raises -> FDCBEvaluation:
-    validate_fdcb_inputs(scenarios, objectives, particles)
+) raises -> RobustEvaluation:
+    validate_physical_inputs(scenarios, objectives, particles)
     var dose_by_scenario = List[List[Float64]]()
     dose_by_scenario.reserve(len(scenarios.matrices))
     for i in range(len(scenarios.matrices)):
-        dose_by_scenario.append(fdcb_compute_dose(scenarios.matrices[i], particles))
+        dose_by_scenario.append(
+            compute_sparse_dose(scenarios.matrices[i], particles)
+        )
 
     var dose_a = List[Float64]()
     var dose_min = List[Float64]()
@@ -164,7 +166,9 @@ def evaluate_robust_physical_fdcb(
         var ddose_chi = ddp - dose_a[voxel]
         if ddose_chi < 0.0 or objectives[voxel].dose_p > 0.0:
             chi2 += (ddose_chi * weight) * (ddose_chi * weight)
-        dose_p_weighted_avg2 += (weight * objectives[voxel].dose_p) * (weight * objectives[voxel].dose_p)
+        dose_p_weighted_avg2 += (weight * objectives[voxel].dose_p) * (
+            weight * objectives[voxel].dose_p
+        )
 
         var scenario = min_scenario[voxel]
         if objectives[voxel].dose_p < 0.0:
@@ -175,35 +179,64 @@ def evaluate_robust_physical_fdcb(
             if ddose_grad > 0.0:
                 ddose_grad = 0.0
         elif ddose_grad < 0.0:
-            if ddose_grad > objectives[voxel].dose_p * -objectives[voxel].overdose_tolerance:
+            if (
+                ddose_grad
+                > objectives[voxel].dose_p
+                * -objectives[voxel].overdose_tolerance
+            ):
                 ddose_grad = 0.0
             else:
-                ddose_grad += objectives[voxel].dose_p * objectives[voxel].overdose_tolerance
+                ddose_grad += (
+                    objectives[voxel].dose_p
+                    * objectives[voxel].overdose_tolerance
+                )
         if ddose_grad != 0.0:
-            var factor = (ddose_grad * objectives[voxel].dose_w / dose_d) * (2.0 * objectives[voxel].dose_w / dose_d)
-            scatter_voxel_gradient(scenarios.matrices[scenario], voxel, factor, gradient)
+            var factor = (ddose_grad * objectives[voxel].dose_w / dose_d) * (
+                2.0 * objectives[voxel].dose_w / dose_d
+            )
+            scatter_voxel_gradient(
+                scenarios.matrices[scenario], voxel, factor, gradient
+            )
 
         if include_dmax and objectives[voxel].dose_p > 0.0:
-            var max_weight = objectives[voxel].dose_w_max / objectives[voxel].dose_d
+            var max_weight = (
+                objectives[voxel].dose_w_max / objectives[voxel].dose_d
+            )
             var ddose_max_chi = ddp - dose_max[voxel]
             chi2 += (ddose_max_chi * max_weight) * (ddose_max_chi * max_weight)
-            dose_p_weighted_avg2 += (max_weight * objectives[voxel].dose_p) * (max_weight * objectives[voxel].dose_p)
+            dose_p_weighted_avg2 += (max_weight * objectives[voxel].dose_p) * (
+                max_weight * objectives[voxel].dose_p
+            )
             var ddose_max_grad = ddose_max_chi
             if ddose_max_grad > 0.0:
                 ddose_max_grad = 0.0
             elif ddose_max_grad < 0.0:
-                if ddose_max_grad > objectives[voxel].dose_p * -objectives[voxel].overdose_tolerance:
+                if (
+                    ddose_max_grad
+                    > objectives[voxel].dose_p
+                    * -objectives[voxel].overdose_tolerance
+                ):
                     ddose_max_grad = 0.0
                 else:
-                    ddose_max_grad += objectives[voxel].dose_p * objectives[voxel].overdose_tolerance
+                    ddose_max_grad += (
+                        objectives[voxel].dose_p
+                        * objectives[voxel].overdose_tolerance
+                    )
             if ddose_max_grad != 0.0:
-                var factor_max = (ddose_max_grad * objectives[voxel].dose_w_max / dose_d) * (2.0 * objectives[voxel].dose_w_max / dose_d)
-                scatter_voxel_gradient(scenarios.matrices[max_scenario[voxel]], voxel, factor_max, gradient)
+                var factor_max = (
+                    ddose_max_grad * objectives[voxel].dose_w_max / dose_d
+                ) * (2.0 * objectives[voxel].dose_w_max / dose_d)
+                scatter_voxel_gradient(
+                    scenarios.matrices[max_scenario[voxel]],
+                    voxel,
+                    factor_max,
+                    gradient,
+                )
 
     var grad_norm2 = 0.0
     for i in range(len(gradient)):
         grad_norm2 += gradient[i] * gradient[i]
-    return FDCBEvaluation(
+    return RobustEvaluation(
         dose_by_scenario^,
         dose_a^,
         dose_min^,
@@ -217,18 +250,22 @@ def evaluate_robust_physical_fdcb(
     )
 
 
-def evaluate_robust_bio_fdcb(
-    scenarios: BioFDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def evaluate_robust_biological(
+    scenarios: BiologicalScenarioSet,
+    objectives: List[VoxelObjective],
     lq_params: List[BioLQParams],
     particles: List[Float64],
     include_dmax: Bool = False,
-) raises -> BioFDCBEvaluation:
-    validate_bio_fdcb_inputs(scenarios, objectives, lq_params, particles)
+) raises -> BioRobustEvaluation:
+    validate_biological_inputs(scenarios, objectives, lq_params, particles)
     var scenario_doses = List[List[BioScenarioDose]]()
     scenario_doses.reserve(len(scenarios.matrices))
     for scenario in range(len(scenarios.matrices)):
-        scenario_doses.append(bio_fdcb_compute_scenario_dose(scenarios.matrices[scenario], lq_params, particles))
+        scenario_doses.append(
+            compute_biological_scenario_dose(
+                scenarios.matrices[scenario], lq_params, particles
+            )
+        )
 
     var dose_a = List[Float64]()
     var dose_min = List[Float64]()
@@ -274,7 +311,9 @@ def evaluate_robust_bio_fdcb(
         var ddose_chi = ddp - dose_a[voxel]
         if ddose_chi < 0.0 or objectives[voxel].dose_p > 0.0:
             chi2 += (ddose_chi * weight) * (ddose_chi * weight)
-        dose_p_weighted_avg2 += (weight * objectives[voxel].dose_p) * (weight * objectives[voxel].dose_p)
+        dose_p_weighted_avg2 += (weight * objectives[voxel].dose_p) * (
+            weight * objectives[voxel].dose_p
+        )
 
         var scenario = min_scenario[voxel]
         if objectives[voxel].dose_p < 0.0:
@@ -290,10 +329,14 @@ def evaluate_robust_bio_fdcb(
             False,
         )
         if include_dmax and objectives[voxel].dose_p > 0.0:
-            var max_weight = objectives[voxel].dose_w_max / objectives[voxel].dose_d
+            var max_weight = (
+                objectives[voxel].dose_w_max / objectives[voxel].dose_d
+            )
             var ddose_max = ddp - dose_max[voxel]
             chi2 += (ddose_max * max_weight) * (ddose_max * max_weight)
-            dose_p_weighted_avg2 += (max_weight * objectives[voxel].dose_p) * (max_weight * objectives[voxel].dose_p)
+            dose_p_weighted_avg2 += (max_weight * objectives[voxel].dose_p) * (
+                max_weight * objectives[voxel].dose_p
+            )
             scatter_bio_gradient_for_selected_scenario(
                 scenarios.matrices[max_scenario[voxel]],
                 scenario_doses[max_scenario[voxel]],
@@ -308,7 +351,7 @@ def evaluate_robust_bio_fdcb(
     var grad_norm2 = 0.0
     for i in range(len(gradient)):
         grad_norm2 += gradient[i] * gradient[i]
-    return BioFDCBEvaluation(
+    return BioRobustEvaluation(
         scenario_doses^,
         dose_a^,
         dose_min^,
@@ -322,10 +365,10 @@ def evaluate_robust_bio_fdcb(
     )
 
 
-def fdcb_exact_dmy_robust_physical(
-    scenarios: FDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
-    evaluation: FDCBEvaluation,
+def compute_robust_physical_exact_step(
+    scenarios: PhysicalScenarioSet,
+    objectives: List[VoxelObjective],
+    evaluation: RobustEvaluation,
     search_direction: List[Float64],
     include_dmax: Bool = False,
 ) raises -> Float64:
@@ -340,19 +383,31 @@ def fdcb_exact_dmy_robust_physical(
         var dose_d = objectives[voxel].dose_d
         var dose_w = objectives[voxel].dose_w
         if objectives[voxel].dose_p > 0.0:
-            var d_r_min = fdcb_voxel_directional_dose(scenarios.matrices[evaluation.min_scenario[voxel]], voxel, search_direction)
+            var d_r_min = compute_voxel_directional_dose(
+                scenarios.matrices[evaluation.min_scenario[voxel]],
+                voxel,
+                search_direction,
+            )
             var ddose = ddp - evaluation.dose_min[voxel]
             dmy += ddose * dose_w / dose_d * (d_r_min * dose_w / dose_d)
             dsum += (d_r_min * dose_w / dose_d) * (d_r_min * dose_w / dose_d)
         elif objectives[voxel].dose_p < 0.0:
-            var d_r_max = fdcb_voxel_directional_dose(scenarios.matrices[evaluation.max_scenario[voxel]], voxel, search_direction)
+            var d_r_max = compute_voxel_directional_dose(
+                scenarios.matrices[evaluation.max_scenario[voxel]],
+                voxel,
+                search_direction,
+            )
             var ddose = ddp - evaluation.dose_max[voxel]
             if ddose > 0.0:
                 ddose = 0.0
             dmy += ddose * dose_w / dose_d * (d_r_max * dose_w / dose_d)
             dsum += (d_r_max * dose_w / dose_d) * (d_r_max * dose_w / dose_d)
         if include_dmax and objectives[voxel].dose_p > 0.0:
-            var d_r_max = fdcb_voxel_directional_dose(scenarios.matrices[evaluation.max_scenario[voxel]], voxel, search_direction)
+            var d_r_max = compute_voxel_directional_dose(
+                scenarios.matrices[evaluation.max_scenario[voxel]],
+                voxel,
+                search_direction,
+            )
             var max_w = objectives[voxel].dose_w_max
             var ddose_max = ddp - evaluation.dose_max[voxel]
             dmy += ddose_max * max_w / dose_d * (d_r_max * max_w / dose_d)
@@ -362,32 +417,40 @@ def fdcb_exact_dmy_robust_physical(
     return 0.0
 
 
-def fdcb_robust_physical_step(
-    scenarios: FDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def update_robust_physical(
+    scenarios: PhysicalScenarioSet,
+    objectives: List[VoxelObjective],
     particles: List[Float64],
     search_direction: List[Float64],
     dmy_fac: Float64,
     min_particles: Float64,
     include_dmax: Bool = False,
-) raises -> FDCBStepResult:
-    var evaluation = evaluate_robust_physical_fdcb(scenarios, objectives, particles, include_dmax)
-    var dmy = fdcb_exact_dmy_robust_physical(scenarios, objectives, evaluation, search_direction, include_dmax)
+) raises -> StepResult:
+    var evaluation = evaluate_robust_physical(
+        scenarios, objectives, particles, include_dmax
+    )
+    var dmy = compute_robust_physical_exact_step(
+        scenarios, objectives, evaluation, search_direction, include_dmax
+    )
     var next_particles = particles.copy()
     for i in range(len(next_particles)):
         next_particles[i] += dmy * dmy_fac * search_direction[i]
         if next_particles[i] < min_particles:
             next_particles[i] = 0.0
-    var next_evaluation = evaluate_robust_physical_fdcb(scenarios, objectives, next_particles, include_dmax)
-    return FDCBStepResult(next_particles^, next_evaluation^, dmy)
+    var next_evaluation = evaluate_robust_physical(
+        scenarios, objectives, next_particles, include_dmax
+    )
+    return StepResult(next_particles^, next_evaluation^, dmy)
 
 
-def fdcb_fletcher_reeves_direction(
+def fletcher_reeves_direction(
     gradient: List[Float64],
     previous_gradient: List[Float64],
     previous_direction: List[Float64],
 ) raises -> List[Float64]:
-    if len(gradient) != len(previous_gradient) or len(gradient) != len(previous_direction):
+    if len(gradient) != len(previous_gradient) or len(gradient) != len(
+        previous_direction
+    ):
         raise Error("gradient/search direction length mismatch")
     var numerator = 0.0
     var denominator = 0.0
@@ -404,13 +467,13 @@ def fdcb_fletcher_reeves_direction(
     return direction^
 
 
-def validate_fdcb_inputs(
-    scenarios: FDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def validate_physical_inputs(
+    scenarios: PhysicalScenarioSet,
+    objectives: List[VoxelObjective],
     particles: List[Float64],
 ) raises:
     if len(scenarios.matrices) == 0:
-        raise Error("FDCB evaluation requires at least one scenario")
+        raise Error("optimizer evaluation requires at least one scenario")
     var voxel_count = scenarios.matrices[0].voxel_count
     var spot_count = scenarios.matrices[0].spot_count
     if len(objectives) != voxel_count:
@@ -424,18 +487,22 @@ def validate_fdcb_inputs(
             raise Error("scenario spot count mismatch")
 
 
-def fdcb_compute_dose(matrix: SparseDoseMatrix, particles: List[Float64]) raises -> List[Float64]:
+def compute_sparse_dose(
+    matrix: SparseDoseMatrix, particles: List[Float64]
+) raises -> List[Float64]:
     if len(particles) != matrix.spot_count:
         raise Error("particle length does not match matrix spot count")
     var dose = List[Float64]()
     dose.resize(matrix.voxel_count, 0.0)
     for i in range(len(matrix.entries)):
-        dose[matrix.entries[i].voxel] += matrix.entries[i].value * particles[matrix.entries[i].spot]
+        dose[matrix.entries[i].voxel] += (
+            matrix.entries[i].value * particles[matrix.entries[i].spot]
+        )
     return dose^
 
 
-def bio_fdcb_compute_scenario_dose(
-    matrix: BioFDCBMatrix,
+def compute_biological_scenario_dose(
+    matrix: BiologicalDoseMatrix,
     lq_params: List[BioLQParams],
     particles: List[Float64],
 ) raises -> List[BioScenarioDose]:
@@ -469,10 +536,18 @@ def bio_fdcb_compute_scenario_dose(
             let_bar_value = let_bar[voxel] / let_mix[voxel]
             var damage: Float64
             if dose_phs <= lq_params[voxel].cut_gy:
-                damage = mev2gy() * (sqrt_beta[voxel] * sqrt_beta[voxel] * mev2gy() + alpha[voxel])
+                damage = mev2gy() * (
+                    sqrt_beta[voxel] * sqrt_beta[voxel] * mev2gy()
+                    + alpha[voxel]
+                )
                 if lq_params[voxel].beta != 0.0:
-                    gradient_denominator = sqrt(damage * lq_params[voxel].beta * 4.0 + lq_params[voxel].alpha * lq_params[voxel].alpha)
-                    var bio_dose = (gradient_denominator - lq_params[voxel].alpha) / (lq_params[voxel].beta * 2.0)
+                    gradient_denominator = sqrt(
+                        damage * lq_params[voxel].beta * 4.0
+                        + lq_params[voxel].alpha * lq_params[voxel].alpha
+                    )
+                    var bio_dose = (
+                        gradient_denominator - lq_params[voxel].alpha
+                    ) / (lq_params[voxel].beta * 2.0)
                     dose_a = dose_phys[voxel] * mev2gy() * bio_dose / dose_phs
                 else:
                     gradient_denominator = lq_params[voxel].alpha
@@ -482,29 +557,38 @@ def bio_fdcb_compute_scenario_dose(
                 var damage_cut = lq_params[voxel].damage_cut()
                 var slope_max = lq_params[voxel].slope_max()
                 damage = (
-                    (sqrt_beta[voxel] * sqrt_beta[voxel] * (lq_params[voxel].cut_gy / let_mix[voxel]) + alpha[voxel])
+                    (
+                        sqrt_beta[voxel]
+                        * sqrt_beta[voxel]
+                        * (lq_params[voxel].cut_gy / let_mix[voxel])
+                        + alpha[voxel]
+                    )
                     * (lq_params[voxel].cut_gy / let_mix[voxel])
                 ) + (dose_phs - lq_params[voxel].cut_gy) * slope_max
-                var bio_dose = (damage - damage_cut) / slope_max + lq_params[voxel].cut_gy
+                var bio_dose = (damage - damage_cut) / slope_max + lq_params[
+                    voxel
+                ].cut_gy
                 gradient_denominator = slope_max
                 dose_a = dose_phys[voxel] * mev2gy() * bio_dose / dose_phs
-        out.append(BioScenarioDose(
-            dose_a,
-            dose_phys[voxel],
-            dose_phs,
-            alpha[voxel],
-            sqrt_beta[voxel],
-            let_mix[voxel],
-            let_bar_value,
-            gradient_denominator,
-        ))
+        out.append(
+            BioScenarioDose(
+                dose_a,
+                dose_phys[voxel],
+                dose_phs,
+                alpha[voxel],
+                sqrt_beta[voxel],
+                let_mix[voxel],
+                let_bar_value,
+                gradient_denominator,
+            )
+        )
     return out^
 
 
 def scatter_bio_gradient_for_selected_scenario(
-    matrix: BioFDCBMatrix,
+    matrix: BiologicalDoseMatrix,
     scenario_doses: List[BioScenarioDose],
-    objective: FDCBVoxelObjective,
+    objective: VoxelObjective,
     lq: BioLQParams,
     voxel: Int,
     scenario: Int,
@@ -540,7 +624,9 @@ def scatter_bio_gradient_for_selected_scenario(
                 entry.alpha
                 + mev2gy() * (aux.sqrt_beta + aux.sqrt_beta) * entry.sqrt_beta
             ) * mev2gy()
-            gradient[entry.spot] += factor * grad_bio / aux.gradient_denominator * entry.g
+            gradient[entry.spot] += (
+                factor * grad_bio / aux.gradient_denominator * entry.g
+            )
         else:
             var dcut = lq.cut_gy / aux.let_mix
             var grad_bio = (
@@ -549,22 +635,36 @@ def scatter_bio_gradient_for_selected_scenario(
                 + (
                     entry.sqrt_beta
                     - entry.let_mix * aux.sqrt_beta / aux.let_mix
-                ) * (aux.sqrt_beta + aux.sqrt_beta) * dcut
+                )
+                * (aux.sqrt_beta + aux.sqrt_beta)
+                * dcut
             ) * dcut + (entry.let_mix * mev2gy()) * lq.slope_max()
-            gradient[entry.spot] += factor * grad_bio / aux.gradient_denominator * entry.g
+            gradient[entry.spot] += (
+                factor * grad_bio / aux.gradient_denominator * entry.g
+            )
 
 
-def scatter_voxel_gradient(matrix: SparseDoseMatrix, voxel: Int, factor: Float64, mut gradient: List[Float64]) raises:
+def scatter_voxel_gradient(
+    matrix: SparseDoseMatrix,
+    voxel: Int,
+    factor: Float64,
+    mut gradient: List[Float64],
+) raises:
     for i in range(len(matrix.entries)):
         if matrix.entries[i].voxel == voxel:
             gradient[matrix.entries[i].spot] += factor * matrix.entries[i].value
 
 
-def fdcb_voxel_directional_dose(matrix: SparseDoseMatrix, voxel: Int, search_direction: List[Float64]) raises -> Float64:
+def compute_voxel_directional_dose(
+    matrix: SparseDoseMatrix, voxel: Int, search_direction: List[Float64]
+) raises -> Float64:
     var total = 0.0
     for i in range(len(matrix.entries)):
         if matrix.entries[i].voxel == voxel:
-            total += search_direction[matrix.entries[i].spot] * matrix.entries[i].value
+            total += (
+                search_direction[matrix.entries[i].spot]
+                * matrix.entries[i].value
+            )
     return total
 
 
@@ -574,14 +674,14 @@ def abs_float(value: Float64) -> Float64:
     return value
 
 
-def validate_bio_fdcb_inputs(
-    scenarios: BioFDCBScenarioSet,
-    objectives: List[FDCBVoxelObjective],
+def validate_biological_inputs(
+    scenarios: BiologicalScenarioSet,
+    objectives: List[VoxelObjective],
     lq_params: List[BioLQParams],
     particles: List[Float64],
 ) raises:
     if len(scenarios.matrices) == 0:
-        raise Error("bio FDCB evaluation requires at least one scenario")
+        raise Error("bio optimizer evaluation requires at least one scenario")
     var voxel_count = scenarios.matrices[0].voxel_count
     var spot_count = scenarios.matrices[0].spot_count
     if len(objectives) != voxel_count:

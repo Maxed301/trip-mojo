@@ -1,33 +1,33 @@
 from std.sys import has_accelerator
 from std.testing import assert_equal, assert_true
 
-from fdcb_accelerator import FDCBAccelerator
-from fdcb_cpu import (
-    evaluate_packed_biological_fdcb,
-    fdcb_exact_step_biological,
-    fdcb_exact_step_physical,
+from device_backend import DeviceWorkspace
+from cpu_backend import (
+    evaluate_biological_objective,
+    compute_biological_exact_step,
+    compute_physical_exact_step,
     packed_slice_dot,
     packed_zero_gradient_direction,
 )
-from fdcb_optimize import (
-    optimize_packed_fdcb,
-    optimize_packed_fdcb_accelerator,
+from optimizer import (
+    optimize_on_cpu,
+    optimize_on_device,
 )
-from fdcb_optimizer import (
-    BioFDCBEntry,
-    BioFDCBMatrix,
-    BioFDCBScenarioSet,
+from robust_objective import (
+    BiologicalMatrixEntry,
+    BiologicalDoseMatrix,
+    BiologicalScenarioSet,
     BioLQParams,
-    FDCBVoxelObjective,
+    VoxelObjective,
 )
-from fdcb_packing import pack_biological_fdcb_problem_v1
-from fdcb_problem import (
-    FDCB_FLAG_ROBUST_INCLUDE_DMAX,
-    evaluate_packed_physical_fdcb,
+from problem_packing import pack_biological_problem
+from optimization_problem import (
+    OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX,
+    evaluate_physical_objective,
 )
-from fdcb_problem import FDCBMinimumParticlePolicyV1, FDCBSettingsV1
-from test_fdcb_cpu import build_biological_problem
-from test_fdcb_problem import (
+from optimization_problem import MinimumParticlePolicy, OptimizerSettings
+from test_cpu_backend import build_biological_problem
+from test_optimization_problem import (
     build_flattened_4d_robust_problem,
     build_multifield_problem,
     build_problem,
@@ -55,7 +55,7 @@ def assert_reduction_close(
 
 def test_accelerator_slice_dots_match_cpu() raises:
     var problem = build_problem()
-    var accelerator = FDCBAccelerator(problem)
+    var accelerator = DeviceWorkspace(problem)
     var actual = accelerator.slice_dots(problem.particles)
     assert_equal(len(actual), len(problem.slices))
     for i in range(len(actual)):
@@ -99,7 +99,7 @@ def test_accelerator_slice_dots_match_cpu() raises:
 def test_accelerator_zero_gradient_matches_cpu() raises:
     var problem = build_multifield_problem()
     var expected = packed_zero_gradient_direction(problem)
-    var accelerator = FDCBAccelerator(problem)
+    var accelerator = DeviceWorkspace(problem)
     var actual = accelerator.zero_gradient_direction()
     assert_equal(len(actual), len(expected))
     for point in range(len(expected)):
@@ -108,13 +108,13 @@ def test_accelerator_zero_gradient_matches_cpu() raises:
 
 def test_accelerator_biological_evaluation_matches_cpu() raises:
     var problem = build_biological_problem(0.02)
-    problem.settings.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX
+    problem.settings.flags |= OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
     problem.voxels[0].prescribed_let = 6.0
     problem.voxels[0].let_weight = 0.5
     problem.scenario_states[0].let_mix_minor = 1.0e7
     problem.scenario_states[1].let_mix_minor = 1.0e7
-    var expected = evaluate_packed_biological_fdcb(problem, problem.particles)
-    var accelerator = FDCBAccelerator(problem)
+    var expected = evaluate_biological_objective(problem, problem.particles)
+    var accelerator = DeviceWorkspace(problem)
     var actual = accelerator.evaluation(problem.particles)
     assert_float64_device_equal(
         actual.weighted_dose2(), expected.dose_p_weighted_avg2
@@ -148,13 +148,13 @@ def test_accelerator_biological_evaluation_matches_cpu() raises:
         )
     assert_float64_device_equal(
         accelerator.exact_step(expected.gradient),
-        fdcb_exact_step_biological(problem, expected, expected.gradient),
+        compute_biological_exact_step(problem, expected, expected.gradient),
     )
     assert_float64_device_equal(actual.chi2(), expected.chi2)
     assert_float64_device_equal(actual.gradient_norm, expected.gradient_norm)
 
     var zero_particles = [0.0]
-    expected = evaluate_packed_biological_fdcb(problem, zero_particles)
+    expected = evaluate_biological_objective(problem, zero_particles)
     actual = accelerator.evaluation(zero_particles)
     for point in range(len(expected.gradient)):
         assert_equal(actual.gradient[point], expected.gradient[point])
@@ -162,8 +162,8 @@ def test_accelerator_biological_evaluation_matches_cpu() raises:
     problem.voxels[0].prescribed_dose = 0.0
     problem.voxels[0].initial_min_scenario = Int32(1)
     problem.voxels[0].initial_max_scenario = Int32(0)
-    expected = evaluate_packed_biological_fdcb(problem, problem.particles)
-    accelerator = FDCBAccelerator(problem)
+    expected = evaluate_biological_objective(problem, problem.particles)
+    accelerator = DeviceWorkspace(problem)
     actual = accelerator.evaluation(problem.particles)
     assert_equal(actual.dose_min[0], 0.0)
     assert_equal(actual.dose_max[0], 0.0)
@@ -171,25 +171,25 @@ def test_accelerator_biological_evaluation_matches_cpu() raises:
     assert_equal(actual.max_scenario[0], expected.max_scenario[0])
 
     problem = build_biological_problem(0.02)
-    problem.settings.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX
+    problem.settings.flags |= OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
     problem.point_active[0] = UInt8(0)
-    expected = evaluate_packed_biological_fdcb(problem, problem.particles)
-    accelerator = FDCBAccelerator(problem)
+    expected = evaluate_biological_objective(problem, problem.particles)
+    accelerator = DeviceWorkspace(problem)
     actual = accelerator.evaluation(problem.particles)
     assert_equal(actual.gradient[0], expected.gradient[0])
 
 
 def test_accelerator_physical_evaluation_matches_cpu() raises:
     var problem = build_problem()
-    problem.settings.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX
+    problem.settings.flags |= OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
     problem.voxels[0].maximum_dose_weight = 0.4
     problem.voxels[0].initial_dose = 0.25
     problem.voxels[0].prescribed_let = 1.0
     problem.voxels[0].let_weight = 100.0
     problem.scenario_states[0].dose_minor = 1.0e6
     problem.scenario_states[1].dose_minor = 2.0e6
-    var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
-    var accelerator = FDCBAccelerator(problem)
+    var expected = evaluate_physical_objective(problem, problem.particles)
+    var accelerator = DeviceWorkspace(problem)
     var actual = accelerator.evaluation(problem.particles)
     for scenario in range(len(expected.dose_by_voxel_scenario)):
         assert_float64_device_equal(
@@ -216,14 +216,14 @@ def test_accelerator_physical_evaluation_matches_cpu() raises:
     assert_float64_device_equal(actual.gradient_norm, expected.gradient_norm)
     assert_float64_device_equal(
         accelerator.exact_step(expected.gradient),
-        fdcb_exact_step_physical(problem, expected, expected.gradient),
+        compute_physical_exact_step(problem, expected, expected.gradient),
     )
 
 
 def test_accelerator_multifield_matches_cpu() raises:
     var problem = build_multifield_problem()
-    var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
-    var accelerator = FDCBAccelerator(problem)
+    var expected = evaluate_physical_objective(problem, problem.particles)
+    var accelerator = DeviceWorkspace(problem)
     assert_equal(accelerator.active_slice_capacity, 3)
     var actual = accelerator.evaluation(problem.particles)
     assert_float64_device_equal(actual.dose_min[0], expected.dose_min[0])
@@ -239,8 +239,8 @@ def test_accelerator_multifield_matches_cpu() raises:
     problem.settings.grace_iterations = UInt32(10)
     problem.settings.epsilon = 0.0
     problem.settings.configured_step_factor = 1.0
-    var expected_optimization = optimize_packed_fdcb(problem)
-    var actual_optimization = optimize_packed_fdcb_accelerator(problem)
+    var expected_optimization = optimize_on_cpu(problem)
+    var actual_optimization = optimize_on_device(problem)
     assert_equal(
         actual_optimization.iterations, expected_optimization.iterations
     )
@@ -259,8 +259,8 @@ def test_accelerator_multifield_matches_cpu() raises:
 
 def test_accelerator_flattened_4d_robust_matches_cpu() raises:
     var problem = build_flattened_4d_robust_problem()
-    var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
-    var accelerator = FDCBAccelerator(problem)
+    var expected = evaluate_physical_objective(problem, problem.particles)
+    var accelerator = DeviceWorkspace(problem)
     var actual = accelerator.evaluation(problem.particles)
     for voxel in range(len(problem.voxels)):
         assert_float64_device_equal(
@@ -283,14 +283,14 @@ def test_accelerator_preserves_nonmonotonic_slice_ranges() raises:
     problem.slices[0].coefficient_offset = problem.slices[1].coefficient_offset
     problem.slices[1].coefficient_offset = first_offset
     problem.validate()
-    var accelerator = FDCBAccelerator(problem)
+    var accelerator = DeviceWorkspace(problem)
     var dots = accelerator.slice_dots(problem.particles)
     for i in range(len(problem.slices)):
         assert_float64_device_equal(
             dots[i],
             packed_slice_dot(problem, problem.slices[i], problem.particles),
         )
-    var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
+    var expected = evaluate_physical_objective(problem, problem.particles)
     var actual = accelerator.evaluation(problem.particles)
     assert_float64_device_equal(actual.chi2(), expected.chi2)
     for point in range(len(expected.gradient)):
@@ -309,8 +309,8 @@ def check_contiguous_uint16_indices(point_count: Int, local_point: Int) raises:
     problem.particles[local_point] = 17.0
     problem.coefficient_point_indices[2] = UInt16(local_point)
     problem.validate()
-    var expected = evaluate_packed_physical_fdcb(problem, problem.particles)
-    var accelerator = FDCBAccelerator(problem)
+    var expected = evaluate_physical_objective(problem, problem.particles)
+    var accelerator = DeviceWorkspace(problem)
     var dots = accelerator.slice_dots(problem.particles)
     for i in range(len(problem.slices)):
         assert_float64_device_equal(
@@ -332,13 +332,13 @@ def test_accelerator_consumes_contiguous_uint16_indices() raises:
 
 def test_accelerator_full_iterations_match_cpu() raises:
     var problem = build_biological_problem(0.02)
-    problem.settings.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX
+    problem.settings.flags |= OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
     problem.settings.max_iterations = UInt32(4)
     problem.settings.grace_iterations = UInt32(10)
     problem.settings.epsilon = 0.0
     problem.settings.configured_step_factor = 1.0
-    var expected = optimize_packed_fdcb(problem)
-    var actual = optimize_packed_fdcb_accelerator(problem)
+    var expected = optimize_on_cpu(problem)
+    var actual = optimize_on_device(problem)
     assert_equal(actual.iterations, expected.iterations)
     assert_equal(actual.stop_reason, expected.stop_reason)
     assert_equal(actual.backtracks, expected.backtracks)
@@ -355,14 +355,14 @@ def test_accelerator_full_iterations_match_cpu() raises:
 
 def test_accelerator_physical_iterations_match_cpu() raises:
     var problem = build_problem()
-    problem.settings.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX
+    problem.settings.flags |= OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
     problem.voxels[0].maximum_dose_weight = 0.4
     problem.settings.max_iterations = UInt32(4)
     problem.settings.grace_iterations = UInt32(10)
     problem.settings.epsilon = 0.0
     problem.settings.configured_step_factor = 1.0
-    var expected = optimize_packed_fdcb(problem)
-    var actual = optimize_packed_fdcb_accelerator(problem)
+    var expected = optimize_on_cpu(problem)
+    var actual = optimize_on_device(problem)
     assert_equal(actual.iterations, expected.iterations)
     assert_equal(actual.stop_reason, expected.stop_reason)
     assert_equal(actual.backtracks, expected.backtracks)
@@ -378,30 +378,36 @@ def test_accelerator_physical_iterations_match_cpu() raises:
 
 def test_accelerator_metric_reduction_crosses_blocks() raises:
     comptime voxel_count = 530
-    var low = List[BioFDCBEntry]()
-    var high = List[BioFDCBEntry]()
-    var objectives = List[FDCBVoxelObjective]()
+    var low = List[BiologicalMatrixEntry]()
+    var high = List[BiologicalMatrixEntry]()
+    var objectives = List[VoxelObjective]()
     var lq = List[BioLQParams]()
     for voxel in range(voxel_count):
-        low.append(BioFDCBEntry(voxel, 0, 1.0, 8.0e7, 8.0e6, 0.0, 8.0e7, 4.0e8))
-        high.append(
-            BioFDCBEntry(voxel, 0, 1.0, 1.0e8, 1.0e7, 0.0, 1.0e8, 7.0e8)
+        low.append(
+            BiologicalMatrixEntry(
+                voxel, 0, 1.0, 8.0e7, 8.0e6, 0.0, 8.0e7, 4.0e8
+            )
         )
-        objectives.append(FDCBVoxelObjective(20.0, 1.0, 1.0, 0.0, 0.05))
+        high.append(
+            BiologicalMatrixEntry(
+                voxel, 0, 1.0, 1.0e8, 1.0e7, 0.0, 1.0e8, 7.0e8
+            )
+        )
+        objectives.append(VoxelObjective(20.0, 1.0, 1.0, 0.0, 0.05))
         lq.append(BioLQParams(0.1, 0.02, 30.0))
     var matrices = [
-        BioFDCBMatrix(voxel_count, 1, low^),
-        BioFDCBMatrix(voxel_count, 1, high^),
+        BiologicalDoseMatrix(voxel_count, 1, low^),
+        BiologicalDoseMatrix(voxel_count, 1, high^),
     ]
-    var problem = pack_biological_fdcb_problem_v1(
-        BioFDCBScenarioSet(matrices^),
+    var problem = pack_biological_problem(
+        BiologicalScenarioSet(matrices^),
         objectives^,
         lq^,
         [10.0],
-        FDCBSettingsV1.reference_defaults(),
-        FDCBMinimumParticlePolicyV1.disabled(),
+        OptimizerSettings.reference_defaults(),
+        MinimumParticlePolicy.disabled(),
     )
-    var accelerator = FDCBAccelerator(problem)
+    var accelerator = DeviceWorkspace(problem)
     var actual = accelerator.evaluation(problem.particles)
     var host_chi2 = 0.0
     var host_weighted = 0.0
@@ -426,4 +432,4 @@ def main() raises:
         test_accelerator_full_iterations_match_cpu()
         test_accelerator_physical_iterations_match_cpu()
         test_accelerator_metric_reduction_crosses_blocks()
-        print("test_fdcb_accelerator: PASS")
+        print("test_device_backend: PASS")

@@ -1,12 +1,12 @@
-#include "fdcb_matrix_abi_v1.h"
+#include "matrix_abi.h"
 
-struct FDCBMojoMatrixGroupHost {
+struct MojoMatrixGroupHost {
    struct STRPFLDDOSE *dose;
    uint32_t beam_count;
    uint32_t field_index;
 };
 
-struct FDCBMojoMatrixArena {
+struct MojoMatrixArena {
    double *coefficients;
    uint16_t *point_indices;
    uint64_t entry_count;
@@ -19,29 +19,29 @@ struct FDCBMojoMatrixArena {
    uint64_t *group_offsets;
    uint32_t *group_slice_offsets;
    uint32_t *group_beam_counts;
-   FDCBMatrixStorageV1 *storage;
-   struct FDCBMojoMatrixArena *next;
+   MojoDeviceMatrix *storage;
+   struct MojoMatrixArena *next;
 };
 
-static struct FDCBMojoMatrixArena *gFDCBMojoMatrixArenas = NULL;
+static struct MojoMatrixArena *gMojoMatrixArenas = NULL;
 
-static void FDCBMojoMatrixFreeArena(struct FDCBMojoMatrixArena *arena) {
+static void MojoMatrixFreeArena(struct MojoMatrixArena *arena) {
    if ( arena == NULL ) return;
    if ( arena->storage != NULL )
-      trip_fdcb_matrix_storage_destroy_v1(arena->storage);
+      trip_optimizer_destroy_device_matrix(arena->storage);
    free(arena->group_offsets);
    free(arena->group_slice_offsets);
    free(arena->group_beam_counts);
    free(arena);
 }
 
-static int FDCBMojoMatrixDirectView(
-   FDCBMatrixStorageV1 **storage,
+static int MojoMatrixDirectView(
+   MojoDeviceMatrix **storage,
    double **coefficients,
    uint16_t **point_indices,
    uint64_t *entry_count
 ) {
-   struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
+   struct MojoMatrixArena *arena = gMojoMatrixArenas;
    if ( arena == NULL || arena->next != NULL || arena->storage == NULL )
       return -1;
    *storage = arena->storage;
@@ -51,9 +51,9 @@ static int FDCBMojoMatrixDirectView(
    return 0;
 }
 
-static int FDCBMojoMatrixDirectViews(
+static int MojoMatrixDirectViews(
    uint32_t device_count,
-   FDCBMatrixStorageV1 **storages,
+   MojoDeviceMatrix **storages,
    double **coefficients,
    uint16_t **point_indices,
    uint64_t *entry_counts,
@@ -62,7 +62,7 @@ static int FDCBMojoMatrixDirectViews(
 ) {
    uint32_t found = 0;
    memset(storages, 0, device_count * sizeof(*storages));
-   for ( struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
+   for ( struct MojoMatrixArena *arena = gMojoMatrixArenas;
          arena != NULL; arena = arena->next ) {
       uint32_t device = arena->device_id;
       if ( device >= device_count || storages[device] != NULL ||
@@ -79,10 +79,10 @@ static int FDCBMojoMatrixDirectViews(
    return found == device_count ? 0 : -1;
 }
 
-static void FDCBMojoMatrixTransferDirectStorage(
-   FDCBMatrixStorageV1 *storage
+static void MojoMatrixTransferDirectStorage(
+   MojoDeviceMatrix *storage
 ) {
-   for ( struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
+   for ( struct MojoMatrixArena *arena = gMojoMatrixArenas;
          arena != NULL; arena = arena->next )
       if ( arena->storage == storage ) {
          arena->storage = NULL;
@@ -90,19 +90,19 @@ static void FDCBMojoMatrixTransferDirectStorage(
       }
 }
 
-static void FDCBMojoMatrixReleaseArenas(void) {
-   while ( gFDCBMojoMatrixArenas != NULL ) {
-      struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
-      gFDCBMojoMatrixArenas = arena->next;
-      FDCBMojoMatrixFreeArena(arena);
+static void MojoMatrixReleaseArenas(void) {
+   while ( gMojoMatrixArenas != NULL ) {
+      struct MojoMatrixArena *arena = gMojoMatrixArenas;
+      gMojoMatrixArenas = arena->next;
+      MojoMatrixFreeArena(arena);
    }
 }
 
-static struct FDCBMojoMatrixArena *FDCBMojoMatrixDoseArena(
+static struct MojoMatrixArena *MojoMatrixDoseArena(
    const struct STRPFLDDOSE *dose
 ) {
    uintptr_t address = (uintptr_t) dose->sFDCPstore.piPnt;
-   for ( struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
+   for ( struct MojoMatrixArena *arena = gMojoMatrixArenas;
          arena != NULL; arena = arena->next ) {
       uintptr_t begin = (uintptr_t) arena->point_indices;
       uintptr_t end = begin + arena->entry_count * sizeof(*arena->point_indices);
@@ -111,18 +111,18 @@ static struct FDCBMojoMatrixArena *FDCBMojoMatrixDoseArena(
    return NULL;
 }
 
-static int FDCBMojoMatrixDirectSlice(
+static int MojoMatrixDirectSlice(
    const struct STRPFLDDOSE *dose,
    int voxel,
    const struct STRPFLDDOSECORRSLICE *slice,
    uint64_t *offset,
    uint32_t *matrix_slice_index
 ) {
-   static __thread struct FDCBMojoMatrixArena *cached_arena = NULL;
+   static __thread struct MojoMatrixArena *cached_arena = NULL;
    static __thread const struct STRPFLDDOSECORRSLICE *cached_slices = NULL;
    static __thread uint64_t cached_group_offset = UINT64_MAX;
    static __thread uint32_t cached_group = 0;
-   struct FDCBMojoMatrixArena *arena = FDCBMojoMatrixDoseArena(dose);
+   struct MojoMatrixArena *arena = MojoMatrixDoseArena(dose);
    uint64_t direct_offset;
    (void) voxel;
    if ( arena == NULL ) return -1;
@@ -175,54 +175,54 @@ static int FDCBMojoMatrixDirectSlice(
    return 0;
 }
 
-static int FDCBMojoMatrixDoseDevice(const struct STRPFLDDOSE *dose) {
-   struct FDCBMojoMatrixArena *arena = FDCBMojoMatrixDoseArena(dose);
+static int MojoMatrixDoseDevice(const struct STRPFLDDOSE *dose) {
+   struct MojoMatrixArena *arena = MojoMatrixDoseArena(dose);
    return arena == NULL ? -1 : (int) arena->device_id;
 }
 
-static void FDCBMojoMatrixResetArenaReferences(void) {
-   for ( struct FDCBMojoMatrixArena *arena = gFDCBMojoMatrixArenas;
+static void MojoMatrixResetArenaReferences(void) {
+   for ( struct MojoMatrixArena *arena = gMojoMatrixArenas;
          arena != NULL; arena = arena->next )
       arena->references = 0;
 }
 
-static void FDCBMojoMatrixRetainDose(const struct STRPFLDDOSE *dose) {
-   struct FDCBMojoMatrixArena *arena = FDCBMojoMatrixDoseArena(dose);
+static void MojoMatrixRetainDose(const struct STRPFLDDOSE *dose) {
+   struct MojoMatrixArena *arena = MojoMatrixDoseArena(dose);
    if ( arena != NULL ) ++arena->references;
 }
 
-static void FDCBMojoMatrixReleaseDose(const struct STRPFLDDOSE *dose) {
-   struct FDCBMojoMatrixArena *arena = FDCBMojoMatrixDoseArena(dose);
+static void MojoMatrixReleaseDose(const struct STRPFLDDOSE *dose) {
+   struct MojoMatrixArena *arena = MojoMatrixDoseArena(dose);
    if ( arena == NULL || arena->references == 0 ) return;
    __atomic_fetch_sub(&arena->references, 1, __ATOMIC_RELAXED);
 }
 
-static void FDCBMojoMatrixDiscardUnreferencedArenas(void) {
-   struct FDCBMojoMatrixArena **link = &gFDCBMojoMatrixArenas;
+static void MojoMatrixDiscardUnreferencedArenas(void) {
+   struct MojoMatrixArena **link = &gMojoMatrixArenas;
    while ( *link != NULL ) {
-      struct FDCBMojoMatrixArena *arena = *link;
+      struct MojoMatrixArena *arena = *link;
       if ( arena->references != 0 ) {
          link = &arena->next;
          continue;
       }
       *link = arena->next;
-      FDCBMojoMatrixFreeArena(arena);
+      MojoMatrixFreeArena(arena);
    }
 }
 
-struct FDCBMojoMatrixBuild {
-   FDCBMatrixEnergySliceV1 *energies;
-   FDCBMatrixPointV1 *points;
-   FDCBMatrixRawEnergyV1 *raw_energies;
-   FDCBMatrixDDDTableV1 *ddd_tables;
-   FDCBMatrixDDDEntryV1 *ddd_entries;
+struct MojoMatrixBuild {
+   MojoMatrixEnergySlice *energies;
+   MojoMatrixPoint *points;
+   MojoRawMatrixEnergy *raw_energies;
+   MojoMatrixDepthDoseTable *ddd_tables;
+   MojoMatrixDepthDoseEntry *ddd_entries;
    uint8_t *fallback_initialized;
    uint32_t *field_energy_offsets;
    uint32_t *field_beam_counts;
    uint8_t *field_nonempty;
-   FDCBMatrixGroupV1 *groups;
-   FDCBMatrixRawGroupV1 *raw_groups;
-   struct FDCBMojoMatrixGroupHost *group_hosts;
+   MojoMatrixGroup *groups;
+   MojoRawMatrixGroup *raw_groups;
+   struct MojoMatrixGroupHost *group_hosts;
    uint32_t energy_count;
    uint64_t point_count;
    uint64_t ddd_entry_count;
@@ -234,11 +234,11 @@ struct FDCBMojoMatrixBuild {
    uint32_t device_id;
    uint64_t voxel_offset;
    uint64_t voxel_count;
-   double accelerator_seconds;
+   double device_seconds;
    double import_seconds;
 };
 
-static void FDCBMojoMatrixBuildFree(struct FDCBMojoMatrixBuild *build) {
+static void MojoMatrixBuildFree(struct MojoMatrixBuild *build) {
    if ( build == NULL ) return;
    free(build->energies);
    free(build->points);
@@ -255,8 +255,8 @@ static void FDCBMojoMatrixBuildFree(struct FDCBMojoMatrixBuild *build) {
    memset(build, 0, sizeof(*build));
 }
 
-static int FDCBMojoMatrixStaticInputInit(
-   struct FDCBMojoMatrixBuild *build,
+static int MojoMatrixStaticInputInit(
+   struct MojoMatrixBuild *build,
    struct STRPOPT *opt,
    struct STRPFLDBASE *fields
 ) {
@@ -327,13 +327,13 @@ static int FDCBMojoMatrixStaticInputInit(
       for ( int beam = 0; beam < rst->nB; ++beam, ++energy_count ) {
          struct STRPRSTSLICE *slice = rst->psRS + beam;
          struct STRPDDD *ddd = &slice->sDDD;
-         FDCBMatrixEnergySliceV1 *energy = build->energies + energy_count;
-         FDCBMatrixRawEnergyV1 *raw = build->raw_energies + energy_count;
-         FDCBMatrixDDDTableV1 *table = build->ddd_tables + energy_count;
+         MojoMatrixEnergySlice *energy = build->energies + energy_count;
+         MojoRawMatrixEnergy *raw = build->raw_energies + energy_count;
+         MojoMatrixDepthDoseTable *table = build->ddd_tables + energy_count;
          energy->point_offset = point_count;
          energy->point_count = (uint32_t) slice->nPnt;
          for ( int point = 0; point < slice->nPnt; ++point, ++point_count ) {
-            FDCBMatrixPointV1 *out = build->points + point_count;
+            MojoMatrixPoint *out = build->points + point_count;
             out->x = slice->psPnt[point].dv[XX];
             out->y = slice->psPnt[point].dv[YY];
             out->f2_max = (slice->psPnt[point].ulFlag & TRPRSTPNT_INSIDE) ?
@@ -348,7 +348,7 @@ static int FDCBMojoMatrixStaticInputInit(
          table->entry_offset = (uint32_t) ddd_entry_count;
          table->entry_count = (uint32_t) ddd->nz;
          for ( int depth = 0; depth < ddd->nz; ++depth, ++ddd_entry_count ) {
-            FDCBMatrixDDDEntryV1 *out = build->ddd_entries + ddd_entry_count;
+            MojoMatrixDepthDoseEntry *out = build->ddd_entries + ddd_entry_count;
             out->depth_cm = ddd->pdTab[TRPDDD_X][depth];
             out->dose = ddd->pdTab[TRPDDD_D][depth];
             if ( ddd->nCol > 2 ) {
@@ -365,8 +365,8 @@ static int FDCBMojoMatrixStaticInputInit(
    return 0;
 }
 
-static void FDCBMojoMatrixInitializeFallbacks(
-   struct FDCBMojoMatrixBuild *build,
+static void MojoMatrixInitializeFallbacks(
+   struct MojoMatrixBuild *build,
    uint32_t field,
    struct STRPRST *rst,
    struct STRPFLDDOSE *dose
@@ -378,7 +378,7 @@ static void FDCBMojoMatrixInitializeFallbacks(
       double values[TRPDDD_MAXTAB] = {0};
       double maximum_fwhm;
       double fallback;
-      FDCBMatrixEnergySliceV1 *energy;
+      MojoMatrixEnergySlice *energy;
       if ( build->fallback_initialized[energy_index] ) continue;
       slice = rst->psRS + beam;
       if ( TRPDDDTabInterpolate(&slice->sDDD,
@@ -406,15 +406,15 @@ static void FDCBMojoMatrixInitializeFallbacks(
    }
 }
 
-static int FDCBMojoMatrixImport(
-   struct FDCBMojoMatrixBuild *build,
-   FDCBMatrixStorageV1 *storage,
-   const FDCBMatrixResultV1 *result
+static int MojoMatrixImport(
+   struct MojoMatrixBuild *build,
+   MojoDeviceMatrix *storage,
+   const MojoMatrixBuildResult *result
 ) {
-   struct FDCBMojoMatrixArena *arena;
+   struct MojoMatrixArena *arena;
    uint64_t *group_offsets = NULL;
    int import_error = 0;
-   int pack_threads = FDCBMojoPackThreads();
+   int pack_threads = MojoPackThreads();
    if ( storage == NULL ) return CMDERR_ERROR | ERRTRPOPT_BADADDR;
    if ( result->group_count != build->group_count ||
         result->slice_count != build->slice_count )
@@ -431,7 +431,7 @@ static int FDCBMojoMatrixImport(
    arena->point_indices = (uint16_t *) result->point_indices;
    arena->storage = storage;
    arena->procedural =
-      (result->flags & FDCB_MATRIX_RESULT_PROCEDURAL) != 0;
+      (result->flags & MOJO_MATRIX_RESULT_PROCEDURAL) != 0;
    arena->device_id = build->device_id;
    arena->voxel_offset = build->voxel_offset;
    arena->voxel_count = build->voxel_count;
@@ -533,29 +533,35 @@ static int FDCBMojoMatrixImport(
       free(arena);
       return CMDERR_ERROR | ERRTRPOPT_BADADDR;
    }
+   if ( trip_optimizer_release_matrix_build_buffers(storage) != 0 ) {
+      free(group_offsets);
+      free(arena->group_slice_offsets);
+      free(arena->group_beam_counts);
+      free(arena);
+      return CMDERR_ERROR | ERRTRPOPT_SYS;
+   }
    if ( arena->procedural )
       arena->group_offsets = group_offsets;
    else
       free(group_offsets);
-   arena->next = gFDCBMojoMatrixArenas;
+   arena->next = gMojoMatrixArenas;
    arena->entry_count = result->entry_count;
-   gFDCBMojoMatrixArenas = arena;
+   gMojoMatrixArenas = arena;
    return 0;
 }
 
-static int FDCBMojoMatrixFlush(struct FDCBMojoMatrixBuild *build) {
-   FDCBMatrixProblemViewV1 problem;
-   FDCBMatrixResultV1 result;
-   FDCBMatrixStorageV1 *storage = NULL;
+static int MojoMatrixFlush(struct MojoMatrixBuild *build) {
+   MojoMatrixBuildInput problem;
+   MojoMatrixBuildResult result;
+   MojoDeviceMatrix *storage = NULL;
    double phase;
    int rc;
    if ( build->group_count == 0 ) return 0;
    memset(&problem, 0, sizeof(problem));
    memset(&result, 0, sizeof(result));
-   problem.version = FDCB_MATRIX_ABI_VERSION_V1;
-   if ( FDCBMojoUsesDeviceMatrix() )
-      problem.flags |= FDCB_MATRIX_FLAG_DEVICE_ONLY |
-         (build->device_id << FDCB_MATRIX_DEVICE_ID_SHIFT);
+   if ( MojoUsesDeviceMatrix() )
+      problem.flags |= MOJO_MATRIX_FLAG_DEVICE_ONLY |
+         (build->device_id << MOJO_MATRIX_DEVICE_ID_SHIFT);
    problem.group_count = build->group_count;
    problem.energy_slice_count = build->energy_count;
    problem.maximum_group_slices = build->maximum_group_slices;
@@ -571,15 +577,15 @@ static int FDCBMojoMatrixFlush(struct FDCBMojoMatrixBuild *build) {
    problem.ddd_tables = build->ddd_tables;
    problem.ddd_entries = build->ddd_entries;
    phase = omp_get_wtime();
-   rc = trip_fdcb_matrix_build_accelerator_v1(&problem, &storage, &result);
-   build->accelerator_seconds += omp_get_wtime() - phase;
+   rc = trip_optimizer_build_device_matrix(&problem, &storage, &result);
+   build->device_seconds += omp_get_wtime() - phase;
    if ( rc == 0 ) {
       phase = omp_get_wtime();
-      rc = FDCBMojoMatrixImport(build, storage, &result);
+      rc = MojoMatrixImport(build, storage, &result);
       build->import_seconds += omp_get_wtime() - phase;
       if ( rc == 0 ) storage = NULL;
    }
-   if ( storage != NULL ) trip_fdcb_matrix_storage_destroy_v1(storage);
+   if ( storage != NULL ) trip_optimizer_destroy_device_matrix(storage);
    build->group_count = 0;
    build->slice_count = 0;
    ++build->flush_count;
@@ -594,16 +600,16 @@ static int TRPOptDoseMatrixPhysMojoBuild(
    int first_voxel,
    int dose_algorithm
 ) {
-   struct FDCBMojoMatrixBuild build;
+   struct MojoMatrixBuild build;
    struct Node *node;
    uint32_t field = 0;
    int rc;
-   int direct = FDCBMojoUsesDeviceMatrix();
-   int device_count = direct ? FDCBMojoDeviceCount() : 1;
+   int direct = MojoUsesDeviceMatrix();
+   int device_count = direct ? MojoDeviceCount() : 1;
    int matrix_voxel_count = voxel_count - first_voxel;
    double start = omp_get_wtime();
    memset(&build, 0, sizeof(build));
-   FDCBMojoMatrixReleaseArenas();
+   MojoMatrixReleaseArenas();
    if ( opt == NULL || fields == NULL || voxels == NULL ||
         first_voxel < 0 || first_voxel > voxel_count )
       return CMDERR_ERROR | ERRTRPOPT_BADADDR;
@@ -614,7 +620,7 @@ static int TRPOptDoseMatrixPhysMojoBuild(
               "lateral tracking, 4D-MG-by-VOI, or optimization DVH\n");
       return CMDERR_ERROR | ERRTRPOPT_BADOPTALGORITHM;
    }
-   rc = FDCBMojoMatrixStaticInputInit(&build, opt, fields);
+   rc = MojoMatrixStaticInputInit(&build, opt, fields);
    if ( rc ) goto done;
    if ( direct && (matrix_voxel_count < device_count || device_count > 3) ) {
       rc = CMDERR_ERROR | ERRTRPOPT_SYS;
@@ -649,7 +655,7 @@ static int TRPOptDoseMatrixPhysMojoBuild(
                 matrix_voxel_count) : 0;
       if ( direct && matrix_device != (int) build.device_id ) {
          build.voxel_count = (uint64_t) voxel - build.voxel_offset;
-         rc = FDCBMojoMatrixFlush(&build);
+         rc = MojoMatrixFlush(&build);
          if ( rc ) goto done;
          build.device_id = (uint32_t) matrix_device;
          build.voxel_offset = (uint64_t) voxel;
@@ -666,14 +672,14 @@ static int TRPOptDoseMatrixPhysMojoBuild(
             struct STRPOPTVOX *active = scenario < 0 ?
                voxels + voxel : voxels[voxel].psRobustOV + scenario;
             struct STRPFLDDOSE *dose;
-            FDCBMatrixGroupV1 *group;
-            FDCBMatrixRawGroupV1 *raw_group;
+            MojoMatrixGroup *group;
+            MojoRawMatrixGroup *raw_group;
             if ( active->psFD == NULL ) {
                rc = CMDERR_ERROR | ERRTRPOPT_BADFIELD;
                goto done;
             }
             if ( build.group_count == build.group_capacity ) {
-               rc = FDCBMojoMatrixFlush(&build);
+               rc = MojoMatrixFlush(&build);
                if ( rc ) goto done;
             }
             dose = active->psFD + field;
@@ -698,7 +704,7 @@ static int TRPOptDoseMatrixPhysMojoBuild(
 #endif
             raw_group->energy_offset = build.field_energy_offsets[field];
             raw_group->energy_count = beam_count;
-            FDCBMojoMatrixInitializeFallbacks(&build, field, rst, dose);
+            MojoMatrixInitializeFallbacks(&build, field, rst, dose);
             raw_group->depth_mm = dose->dzH2O;
             if ( dose_algorithm == TRPFLDDOSE_MULTIPLESCATTERDIVERGENT ) {
                raw_group->divergence_x =
@@ -715,7 +721,7 @@ static int TRPOptDoseMatrixPhysMojoBuild(
       }
    }
    build.voxel_count = (uint64_t) voxel_count - build.voxel_offset;
-   rc = FDCBMojoMatrixFlush(&build);
+   rc = MojoMatrixFlush(&build);
    if ( rc == 0 )
       for ( field = 0; field < (uint32_t) opt->nF; ++field )
          if ( !build.field_nonempty[field] ) {
@@ -725,13 +731,13 @@ static int TRPOptDoseMatrixPhysMojoBuild(
          }
    if ( rc == 0 )
       fprintf(stderr,
-              "<TIME> FDCB Mojo physical matrix: %.6f sec "
-              "(accelerator %.6f import %.6f flushes %u)\n",
-              omp_get_wtime() - start, build.accelerator_seconds,
+              "<TIME> Mojo optimizer physical matrix: %.6f sec "
+              "(device %.6f import %.6f flushes %u)\n",
+              omp_get_wtime() - start, build.device_seconds,
               build.import_seconds, build.flush_count);
 
 done:
-   if ( rc ) FDCBMojoMatrixReleaseArenas();
-   FDCBMojoMatrixBuildFree(&build);
+   if ( rc ) MojoMatrixReleaseArenas();
+   MojoMatrixBuildFree(&build);
    return rc;
 }

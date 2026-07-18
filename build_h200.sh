@@ -33,14 +33,14 @@ apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
     cd '${REPO}'
     '${UV}' sync --frozen
     .venv/bin/mojo build -I . -O3 -g1 \
-      --target-accelerator sm_90a --emit shared-lib fdcb_abi.mojo \
-      -Xlinker -lm -o '${MOJO_BUILD}/libtrip_fdcb_mojo.so'
+      --target-accelerator sm_90a --emit shared-lib trip_abi.mojo \
+      -Xlinker -lm -o '${MOJO_BUILD}/libtrip_mojo.so'
     cmake -S '${TRIP}' -B '${TRIP_BUILD}' \
       -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_FLAGS_RELEASE='-O3 -DNDEBUG' \
       -DTRIP_MOJO_ROOT='${REPO}' \
-      -DTRIP_MOJO_LIBRARY='${MOJO_BUILD}/libtrip_fdcb_mojo.so'
+      -DTRIP_MOJO_LIBRARY='${MOJO_BUILD}/libtrip_mojo.so'
     cmake --build '${TRIP_BUILD}' -j'${THREADS}'
     cc -O2 '${REPO}/tools/compare_rst_particles.c' -lm \
       -o '${MOJO_BUILD}/compare_rst_particles'
@@ -49,4 +49,4 @@ apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
   "
 
 stat -c 'artifact %y %s %n' \
-  "${MOJO_BUILD}/libtrip_fdcb_mojo.so" "${TRIP_BUILD}/TRiP98"
+  "${MOJO_BUILD}/libtrip_mojo.so" "${TRIP_BUILD}/TRiP98"

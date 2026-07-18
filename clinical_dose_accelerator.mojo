@@ -8,21 +8,21 @@ from std.sys.info import size_of
 
 from clinical_dose import (
     BioInterpolation,
-    ClinicalDoseBioEntryV1,
-    ClinicalDoseBioTableV1,
-    ClinicalDoseCTStateV1,
-    ClinicalDoseDDDEntryV1,
-    ClinicalDoseDDDTableV1,
-    ClinicalDoseEnergyV1,
-    ClinicalDoseFieldV1,
-    ClinicalDoseGridFieldV1,
-    ClinicalDoseGridV1,
-    ClinicalDoseOutputV1,
+    ClinicalDoseBioEntry,
+    ClinicalDoseBioTable,
+    ClinicalDoseCTState,
+    ClinicalDoseDDDEntry,
+    ClinicalDoseDDDTable,
+    ClinicalDoseEnergy,
+    ClinicalDoseField,
+    ClinicalDoseGridField,
+    ClinicalDoseGrid,
+    ClinicalDoseOutput,
     ClinicalDosePointRun,
-    ClinicalDosePointV1,
-    ClinicalDosePositionV1,
-    ClinicalDoseProblemViewV1,
-    ClinicalDoseStateV1,
+    ClinicalDosePoint,
+    ClinicalDosePosition,
+    ClinicalDoseProblem,
+    ClinicalDoseState,
     DDDInterpolation,
     CLINICAL_DOSE_8LN2,
     CLINICAL_DOSE_BIOLOGICAL,
@@ -85,8 +85,8 @@ def _grid_from_metadata(
     floating_metadata: UnsafePointer[Float64, MutAnyOrigin],
     integer_offset: Int,
     floating_offset: Int,
-) -> ClinicalDoseGridV1:
-    return ClinicalDoseGridV1(
+) -> ClinicalDoseGrid:
+    return ClinicalDoseGrid(
         Int32(integer_metadata[integer_offset]),
         Int32(integer_metadata[integer_offset + 1]),
         Int32(integer_metadata[integer_offset + 2]),
@@ -106,24 +106,24 @@ def clinical_dose_kernel(
     integer_metadata: UnsafePointer[Int64, MutAnyOrigin],
     floating_metadata: UnsafePointer[Float64, MutAnyOrigin],
     voxel_voi: UnsafePointer[Int32, MutAnyOrigin],
-    ct_states: UnsafePointer[ClinicalDoseCTStateV1, MutAnyOrigin],
-    states: UnsafePointer[ClinicalDoseStateV1, MutAnyOrigin],
-    transformed_voxels: UnsafePointer[ClinicalDosePositionV1, MutAnyOrigin],
+    ct_states: UnsafePointer[ClinicalDoseCTState, MutAnyOrigin],
+    states: UnsafePointer[ClinicalDoseState, MutAnyOrigin],
+    transformed_voxels: UnsafePointer[ClinicalDosePosition, MutAnyOrigin],
     ct_data: UnsafePointer[Int16, MutAnyOrigin],
     ct_boundaries: UnsafePointer[Float64, MutAnyOrigin],
     dose_axis_centers: UnsafePointer[Float64, MutAnyOrigin],
     dense_hlut: UnsafePointer[Float64, MutAnyOrigin],
-    grid_fields: UnsafePointer[ClinicalDoseGridFieldV1, MutAnyOrigin],
-    fields: UnsafePointer[ClinicalDoseFieldV1, MutAnyOrigin],
-    energies: UnsafePointer[ClinicalDoseEnergyV1, MutAnyOrigin],
-    points: UnsafePointer[ClinicalDosePointV1, MutAnyOrigin],
-    ddd_tables: UnsafePointer[ClinicalDoseDDDTableV1, MutAnyOrigin],
-    ddd_entries: UnsafePointer[ClinicalDoseDDDEntryV1, MutAnyOrigin],
-    bio_tables: UnsafePointer[ClinicalDoseBioTableV1, MutAnyOrigin],
-    bio_entries: UnsafePointer[ClinicalDoseBioEntryV1, MutAnyOrigin],
+    grid_fields: UnsafePointer[ClinicalDoseGridField, MutAnyOrigin],
+    fields: UnsafePointer[ClinicalDoseField, MutAnyOrigin],
+    energies: UnsafePointer[ClinicalDoseEnergy, MutAnyOrigin],
+    points: UnsafePointer[ClinicalDosePoint, MutAnyOrigin],
+    ddd_tables: UnsafePointer[ClinicalDoseDDDTable, MutAnyOrigin],
+    ddd_entries: UnsafePointer[ClinicalDoseDDDEntry, MutAnyOrigin],
+    bio_tables: UnsafePointer[ClinicalDoseBioTable, MutAnyOrigin],
+    bio_entries: UnsafePointer[ClinicalDoseBioEntry, MutAnyOrigin],
     energy_run_offsets: UnsafePointer[UInt32, MutAnyOrigin],
     point_runs: UnsafePointer[ClinicalDosePointRun, MutAnyOrigin],
-    output: UnsafePointer[ClinicalDoseOutputV1, MutAnyOrigin],
+    output: UnsafePointer[ClinicalDoseOutput, MutAnyOrigin],
 ):
     var work_index = global_idx.x
     var voxel_count = Int(integer_metadata[0])
@@ -133,7 +133,7 @@ def clinical_dose_kernel(
     var state_index = work_index // voxel_count
     var voxel = work_index - state_index * voxel_count
 
-    var result = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    var result = ClinicalDoseOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     var flags = UInt32(integer_metadata[1])
     var field_count = Int(integer_metadata[2])
     var voi_count = Int(integer_metadata[3])
@@ -233,7 +233,7 @@ def clinical_dose_kernel(
                 continue
             var table = ddd_tables[Int(energy.ddd_table)].copy()
             var focus2 = Float64(energy.focus) * Float64(energy.focus)
-            var bio_table = ClinicalDoseBioTableV1(UInt32(0), UInt32(0), 0.0)
+            var bio_table = ClinicalDoseBioTable(UInt32(0), UInt32(0), 0.0)
             var bio = BioInterpolation(0.0, 0.0, 0.0, 0.0, 0.0)
             if biological:
                 bio_table = bio_tables[
@@ -324,15 +324,15 @@ def clinical_dose_kernel(
 
 
 def reduce_clinical_dose_states_kernel(
-    state_output: UnsafePointer[ClinicalDoseOutputV1, MutAnyOrigin],
-    output: UnsafePointer[ClinicalDoseOutputV1, MutAnyOrigin],
+    state_output: UnsafePointer[ClinicalDoseOutput, MutAnyOrigin],
+    output: UnsafePointer[ClinicalDoseOutput, MutAnyOrigin],
     voxel_count: Int,
     state_count: Int,
 ):
     var voxel = global_idx.x
     if voxel >= voxel_count:
         return
-    var result = ClinicalDoseOutputV1(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    var result = ClinicalDoseOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     for state_index in range(state_count):
         var value = state_output[state_index * voxel_count + voxel].copy()
         result.absorbed_dose += value.absorbed_dose
@@ -345,8 +345,8 @@ def reduce_clinical_dose_states_kernel(
 
 
 def compute_clinical_dose_accelerator(
-    view: ClinicalDoseProblemViewV1,
-    output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
+    view: ClinicalDoseProblem,
+    output: UnsafePointer[ClinicalDoseOutput, MutExternalOrigin],
 ) raises:
     validate_clinical_dose(view)
     var dense_hlut = build_dense_hlut(view, Int(view.max_threads))
@@ -419,21 +419,21 @@ def compute_clinical_dose_accelerator(
     var ct_state_device = _copy_bytes_to_device(
         context,
         view.ct_states.bitcast[UInt8](),
-        Int(view.state_count) * size_of[ClinicalDoseCTStateV1](),
+        Int(view.state_count) * size_of[ClinicalDoseCTState](),
     )
     var state_device = _copy_bytes_to_device(
         context,
         view.states.bitcast[UInt8](),
         (
             Int(view.state_count)
-            * size_of[ClinicalDoseStateV1]() if view.state_count
+            * size_of[ClinicalDoseState]() if view.state_count
             > UInt32(1) else 0
         ),
     )
     var transformed_device = _copy_bytes_to_device(
         context,
         view.transformed_voxels.bitcast[UInt8](),
-        Int(view.transformed_voxel_count) * size_of[ClinicalDosePositionV1](),
+        Int(view.transformed_voxel_count) * size_of[ClinicalDosePosition](),
     )
     var ct_device = _copy_bytes_to_device(
         context,
@@ -458,42 +458,42 @@ def compute_clinical_dose_accelerator(
     var grid_field_device = _copy_bytes_to_device(
         context,
         view.grid_fields.bitcast[UInt8](),
-        Int(view.field_count) * size_of[ClinicalDoseGridFieldV1](),
+        Int(view.field_count) * size_of[ClinicalDoseGridField](),
     )
     var field_device = _copy_bytes_to_device(
         context,
         view.fields.bitcast[UInt8](),
-        Int(view.field_count) * size_of[ClinicalDoseFieldV1](),
+        Int(view.field_count) * size_of[ClinicalDoseField](),
     )
     var energy_device = _copy_bytes_to_device(
         context,
         view.energies.bitcast[UInt8](),
-        Int(view.energy_count) * size_of[ClinicalDoseEnergyV1](),
+        Int(view.energy_count) * size_of[ClinicalDoseEnergy](),
     )
     var point_device = _copy_bytes_to_device(
         context,
         view.points.bitcast[UInt8](),
-        Int(view.point_count) * size_of[ClinicalDosePointV1](),
+        Int(view.point_count) * size_of[ClinicalDosePoint](),
     )
     var ddd_table_device = _copy_bytes_to_device(
         context,
         view.ddd_tables.bitcast[UInt8](),
-        Int(view.ddd_table_count) * size_of[ClinicalDoseDDDTableV1](),
+        Int(view.ddd_table_count) * size_of[ClinicalDoseDDDTable](),
     )
     var ddd_entry_device = _copy_bytes_to_device(
         context,
         view.ddd_entries.bitcast[UInt8](),
-        Int(view.ddd_entry_count) * size_of[ClinicalDoseDDDEntryV1](),
+        Int(view.ddd_entry_count) * size_of[ClinicalDoseDDDEntry](),
     )
     var bio_table_device = _copy_bytes_to_device(
         context,
         view.bio_tables.bitcast[UInt8](),
-        Int(view.bio_table_count) * size_of[ClinicalDoseBioTableV1](),
+        Int(view.bio_table_count) * size_of[ClinicalDoseBioTable](),
     )
     var bio_entry_device = _copy_bytes_to_device(
         context,
         view.bio_entries.bitcast[UInt8](),
-        Int(view.bio_entry_count) * size_of[ClinicalDoseBioEntryV1](),
+        Int(view.bio_entry_count) * size_of[ClinicalDoseBioEntry](),
     )
     var run_offset_device = _copy_bytes_to_device(
         context,
@@ -515,24 +515,24 @@ def compute_clinical_dose_accelerator(
         integer_device.unsafe_ptr(),
         floating_device.unsafe_ptr(),
         voi_device.unsafe_ptr().bitcast[Int32](),
-        ct_state_device.unsafe_ptr().bitcast[ClinicalDoseCTStateV1](),
-        state_device.unsafe_ptr().bitcast[ClinicalDoseStateV1](),
-        transformed_device.unsafe_ptr().bitcast[ClinicalDosePositionV1](),
+        ct_state_device.unsafe_ptr().bitcast[ClinicalDoseCTState](),
+        state_device.unsafe_ptr().bitcast[ClinicalDoseState](),
+        transformed_device.unsafe_ptr().bitcast[ClinicalDosePosition](),
         ct_device.unsafe_ptr().bitcast[Int16](),
         ct_boundary_device.unsafe_ptr().bitcast[Float64](),
         dose_axis_device.unsafe_ptr().bitcast[Float64](),
         dense_device.unsafe_ptr().bitcast[Float64](),
-        grid_field_device.unsafe_ptr().bitcast[ClinicalDoseGridFieldV1](),
-        field_device.unsafe_ptr().bitcast[ClinicalDoseFieldV1](),
-        energy_device.unsafe_ptr().bitcast[ClinicalDoseEnergyV1](),
-        point_device.unsafe_ptr().bitcast[ClinicalDosePointV1](),
-        ddd_table_device.unsafe_ptr().bitcast[ClinicalDoseDDDTableV1](),
-        ddd_entry_device.unsafe_ptr().bitcast[ClinicalDoseDDDEntryV1](),
-        bio_table_device.unsafe_ptr().bitcast[ClinicalDoseBioTableV1](),
-        bio_entry_device.unsafe_ptr().bitcast[ClinicalDoseBioEntryV1](),
+        grid_field_device.unsafe_ptr().bitcast[ClinicalDoseGridField](),
+        field_device.unsafe_ptr().bitcast[ClinicalDoseField](),
+        energy_device.unsafe_ptr().bitcast[ClinicalDoseEnergy](),
+        point_device.unsafe_ptr().bitcast[ClinicalDosePoint](),
+        ddd_table_device.unsafe_ptr().bitcast[ClinicalDoseDDDTable](),
+        ddd_entry_device.unsafe_ptr().bitcast[ClinicalDoseDDDEntry](),
+        bio_table_device.unsafe_ptr().bitcast[ClinicalDoseBioTable](),
+        bio_entry_device.unsafe_ptr().bitcast[ClinicalDoseBioEntry](),
         run_offset_device.unsafe_ptr().bitcast[UInt32](),
         run_device.unsafe_ptr().bitcast[ClinicalDosePointRun](),
-        state_output_device.unsafe_ptr().bitcast[ClinicalDoseOutputV1](),
+        state_output_device.unsafe_ptr().bitcast[ClinicalDoseOutput](),
         grid_dim=ceildiv(
             Int(view.grid_voxel_count) * Int(view.state_count),
             CLINICAL_DOSE_ACCELERATOR_BLOCK_SIZE,
@@ -540,8 +540,8 @@ def compute_clinical_dose_accelerator(
         block_dim=CLINICAL_DOSE_ACCELERATOR_BLOCK_SIZE,
     )
     context.enqueue_function[reduce_clinical_dose_states_kernel](
-        state_output_device.unsafe_ptr().bitcast[ClinicalDoseOutputV1](),
-        output_device.unsafe_ptr().bitcast[ClinicalDoseOutputV1](),
+        state_output_device.unsafe_ptr().bitcast[ClinicalDoseOutput](),
+        output_device.unsafe_ptr().bitcast[ClinicalDoseOutput](),
         Int(view.grid_voxel_count),
         Int(view.state_count),
         grid_dim=ceildiv(
@@ -557,7 +557,7 @@ def compute_clinical_dose_accelerator(
     var output_values = output_host.unsafe_ptr()
     for voxel in range(Int(view.grid_voxel_count)):
         var offset = voxel * 6
-        output[voxel] = ClinicalDoseOutputV1(
+        output[voxel] = ClinicalDoseOutput(
             output_values[offset],
             output_values[offset + 1],
             output_values[offset + 2],
@@ -567,13 +567,13 @@ def compute_clinical_dose_accelerator(
         )
 
 
-def clinical_dose_compute_accelerator_abi_v1(
+def clinical_dose_compute_accelerator_abi(
     problem_pointer: OpaquePointer[MutExternalOrigin],
-    output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
+    output: UnsafePointer[ClinicalDoseOutput, MutExternalOrigin],
     output_count: UInt64,
 ) -> Int32:
     try:
-        var view = problem_pointer.bitcast[ClinicalDoseProblemViewV1]()[].copy()
+        var view = problem_pointer.bitcast[ClinicalDoseProblem]()[].copy()
         if output_count != UInt64(view.grid_voxel_count):
             return Int32(-2)
         compute_clinical_dose_accelerator(view, output)

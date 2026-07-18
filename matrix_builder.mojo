@@ -1,4 +1,4 @@
-"""Accelerator construction of TRiP's compact lateral FDCB matrix."""
+"""Accelerator construction of TRiP's compact lateral dose matrix."""
 
 from std.gpu import WARP_SIZE, barrier, global_idx, thread_idx
 from std.gpu.host import DeviceBuffer, DeviceContext, HostBuffer
@@ -10,41 +10,40 @@ from std.sys.info import size_of
 from std.time import perf_counter_ns
 
 
-comptime FDCB_MATRIX_ABI_VERSION_V1 = UInt32(1)
-comptime FDCB_MATRIX_FLAG_DEVICE_ONLY = UInt32(1)
-comptime FDCB_MATRIX_FLAG_FORCE_PROCEDURAL = UInt32(2)
-comptime FDCB_MATRIX_DEVICE_ID_SHIFT = 8
-comptime FDCB_MATRIX_DEVICE_ID_MASK = UInt32(0xFF00)
-comptime FDCB_MATRIX_BLOCK_SIZE = 128
-comptime FDCB_MATRIX_FILL_BLOCK_SIZE = 128
-comptime FDCB_MATRIX_FILL_WARPS = FDCB_MATRIX_FILL_BLOCK_SIZE // WARP_SIZE
-comptime FDCB_MATRIX_MATERIALIZED_ENTRY_LIMIT = UInt64(10_000_000_000)
-comptime FDCB_MATRIX_RESULT_PROCEDURAL = UInt32(1)
-comptime FDCB_MATRIX_REDUCTION_GROUP_SIZE = 32
-comptime FDCB_MATRIX_REDUCTION_GROUPS = (
-    FDCB_MATRIX_BLOCK_SIZE // FDCB_MATRIX_REDUCTION_GROUP_SIZE
+comptime MATRIX_FLAG_DEVICE_ONLY = UInt32(1)
+comptime MATRIX_FLAG_FORCE_PROCEDURAL = UInt32(2)
+comptime MATRIX_DEVICE_ID_SHIFT = 8
+comptime MATRIX_DEVICE_ID_MASK = UInt32(0xFF00)
+comptime MATRIX_BLOCK_SIZE = 128
+comptime MATRIX_FILL_BLOCK_SIZE = 128
+comptime MATRIX_FILL_WARPS = MATRIX_FILL_BLOCK_SIZE // WARP_SIZE
+comptime MATRIX_MATERIALIZED_ENTRY_LIMIT = UInt64(10_000_000_000)
+comptime MATRIX_RESULT_PROCEDURAL = UInt32(1)
+comptime MATRIX_REDUCTION_GROUP_SIZE = 32
+comptime MATRIX_REDUCTION_GROUPS = (
+    MATRIX_BLOCK_SIZE // MATRIX_REDUCTION_GROUP_SIZE
 )
-comptime FDCB_MATRIX_PI = 3.141592653589793238462643383279502884
+comptime MATRIX_PI = 3.141592653589793238462643383279502884
 # TRiP's historical TRP_8LN2 is defined as 0.6932 * 8, then halved.
-comptime FDCB_MATRIX_4LN2 = 2.7728
+comptime MATRIX_4LN2 = 2.7728
 
 
 @fieldwise_init
-struct FDCBMatrixEnergySliceV1(Copyable, Movable):
+struct MatrixEnergySlice(Copyable, Movable):
     var point_offset: UInt64
     var point_count: UInt32
     var reserved: UInt32
 
 
 @fieldwise_init
-struct FDCBMatrixPointV1(Copyable, Movable):
+struct MatrixPoint(Copyable, Movable):
     var x: Float64
     var y: Float64
     var f2_max: Float64
 
 
 @fieldwise_init
-struct FDCBMatrixGroupV1(Copyable, Movable):
+struct MatrixGroup(Copyable, Movable):
     var slice_offset: UInt64
     var slice_count: UInt32
     var reserved: UInt32
@@ -56,7 +55,7 @@ struct FDCBMatrixGroupV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBMatrixRawEnergyV1(Copyable, Movable):
+struct RawMatrixEnergy(Copyable, Movable):
     var energy_slice: UInt32
     var ddd_table: UInt32
     var depth_shift_mm: Float64
@@ -66,7 +65,7 @@ struct FDCBMatrixRawEnergyV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBMatrixRawGroupV1(Copyable, Movable):
+struct RawMatrixGroup(Copyable, Movable):
     var energy_offset: UInt32
     var energy_count: UInt32
     var depth_mm: Float64
@@ -75,13 +74,13 @@ struct FDCBMatrixRawGroupV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBMatrixDDDTableV1(Copyable, Movable):
+struct MatrixDepthDoseTable(Copyable, Movable):
     var entry_offset: UInt32
     var entry_count: UInt32
 
 
 @fieldwise_init
-struct FDCBMatrixDDDEntryV1(Copyable, Movable):
+struct MatrixDepthDoseEntry(Copyable, Movable):
     var depth_cm: Float64
     var dose: Float64
     var fwhm1: Float64
@@ -90,8 +89,7 @@ struct FDCBMatrixDDDEntryV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBMatrixProblemViewV1(Copyable, Movable):
-    var version: UInt32
+struct MatrixBuildInput(Copyable, Movable):
     var group_count: UInt32
     var energy_slice_count: UInt32
     var maximum_group_slices: UInt32
@@ -100,17 +98,17 @@ struct FDCBMatrixProblemViewV1(Copyable, Movable):
     var ddd_table_count: UInt32
     var flags: UInt32
     var ddd_entry_count: UInt64
-    var energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutExternalOrigin]
-    var points: UnsafePointer[FDCBMatrixPointV1, MutExternalOrigin]
-    var groups: UnsafePointer[FDCBMatrixGroupV1, MutExternalOrigin]
-    var raw_energies: UnsafePointer[FDCBMatrixRawEnergyV1, MutExternalOrigin]
-    var raw_groups: UnsafePointer[FDCBMatrixRawGroupV1, MutExternalOrigin]
-    var ddd_tables: UnsafePointer[FDCBMatrixDDDTableV1, MutExternalOrigin]
-    var ddd_entries: UnsafePointer[FDCBMatrixDDDEntryV1, MutExternalOrigin]
+    var energy_slices: UnsafePointer[MatrixEnergySlice, MutExternalOrigin]
+    var points: UnsafePointer[MatrixPoint, MutExternalOrigin]
+    var groups: UnsafePointer[MatrixGroup, MutExternalOrigin]
+    var raw_energies: UnsafePointer[RawMatrixEnergy, MutExternalOrigin]
+    var raw_groups: UnsafePointer[RawMatrixGroup, MutExternalOrigin]
+    var ddd_tables: UnsafePointer[MatrixDepthDoseTable, MutExternalOrigin]
+    var ddd_entries: UnsafePointer[MatrixDepthDoseEntry, MutExternalOrigin]
 
 
 @fieldwise_init
-struct FDCBMatrixResultV1(Copyable, Movable):
+struct MatrixBuildResult(Copyable, Movable):
     var entry_count: UInt64
     var slice_count: UInt64
     var group_count: UInt32
@@ -124,7 +122,7 @@ struct FDCBMatrixResultV1(Copyable, Movable):
 
 
 @fieldwise_init
-struct FDCBMatrixStorageV1(Movable):
+struct DeviceMatrix(Movable):
     var context: DeviceContext
     var device_only: Bool
     var procedural: Bool
@@ -174,8 +172,8 @@ def _copy_bytes_to_device[
 
 @always_inline("nodebug")
 def _interpolate_ddd(
-    table: FDCBMatrixDDDTableV1,
-    entries: UnsafePointer[FDCBMatrixDDDEntryV1, MutAnyOrigin],
+    table: MatrixDepthDoseTable,
+    entries: UnsafePointer[MatrixDepthDoseEntry, MutAnyOrigin],
     depth_cm: Float64,
 ) -> _DDDValue:
     var first = entries[Int(table.entry_offset)].copy()
@@ -217,11 +215,11 @@ def _interpolate_ddd(
 
 
 def _materialize_raw_slices_kernel(
-    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
-    raw_energies: UnsafePointer[FDCBMatrixRawEnergyV1, MutAnyOrigin],
-    raw_groups: UnsafePointer[FDCBMatrixRawGroupV1, MutAnyOrigin],
-    ddd_tables: UnsafePointer[FDCBMatrixDDDTableV1, MutAnyOrigin],
-    ddd_entries: UnsafePointer[FDCBMatrixDDDEntryV1, MutAnyOrigin],
+    groups: UnsafePointer[MatrixGroup, MutAnyOrigin],
+    raw_energies: UnsafePointer[RawMatrixEnergy, MutAnyOrigin],
+    raw_groups: UnsafePointer[RawMatrixGroup, MutAnyOrigin],
+    ddd_tables: UnsafePointer[MatrixDepthDoseTable, MutAnyOrigin],
+    ddd_entries: UnsafePointer[MatrixDepthDoseEntry, MutAnyOrigin],
     group_count: Int,
     maximum_group_slices: Int,
     slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
@@ -256,18 +254,16 @@ def _materialize_raw_slices_kernel(
     slice_values[offset + 9] = raw_group.divergence_y
     if depth.valid:
         var f2_0 = raw_energy.focus_squared + depth.fwhm1 * depth.fwhm1
-        var isig2_0 = FDCB_MATRIX_4LN2 / f2_0
+        var isig2_0 = MATRIX_4LN2 / f2_0
         slice_values[offset] = depth.dose
         slice_values[offset + 1] = isig2_0
-        slice_values[offset + 3] = (
-            isig2_0 / FDCB_MATRIX_PI * (1.0 - depth.mixture)
-        )
+        slice_values[offset + 3] = isig2_0 / MATRIX_PI * (1.0 - depth.mixture)
         slice_values[offset + 5] = raw_energy.lateral_limit_scale * f2_0
         if depth.mixture > 0.0:
             var f2_1 = raw_energy.focus_squared + depth.fwhm2 * depth.fwhm2
-            var isig2_1 = FDCB_MATRIX_4LN2 / f2_1
+            var isig2_1 = MATRIX_4LN2 / f2_1
             slice_values[offset + 2] = isig2_1
-            slice_values[offset + 4] = isig2_1 / FDCB_MATRIX_PI * depth.mixture
+            slice_values[offset + 4] = isig2_1 / MATRIX_PI * depth.mixture
             slice_values[offset + 6] = raw_energy.lateral_limit_scale * f2_1
         var maximum_fwhm = depth.fwhm1
         if depth.fwhm2 > maximum_fwhm:
@@ -280,9 +276,9 @@ def _materialize_raw_slices_kernel(
 
 @always_inline("nodebug")
 def _radius_squared(
-    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
-    points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
-    group: FDCBMatrixGroupV1,
+    energy_slices: UnsafePointer[MatrixEnergySlice, MutAnyOrigin],
+    points: UnsafePointer[MatrixPoint, MutAnyOrigin],
+    group: MatrixGroup,
     slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
     slice_values: UnsafePointer[Float64, MutAnyOrigin],
     slice_index: Int,
@@ -332,9 +328,9 @@ def _coefficient_from_radius(
 
 @always_inline("nodebug")
 def _contribution(
-    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
-    points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
-    group: FDCBMatrixGroupV1,
+    energy_slices: UnsafePointer[MatrixEnergySlice, MutAnyOrigin],
+    points: UnsafePointer[MatrixPoint, MutAnyOrigin],
+    group: MatrixGroup,
     slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
     slice_values: UnsafePointer[Float64, MutAnyOrigin],
     slice_index: Int,
@@ -355,9 +351,9 @@ def _contribution(
 
 
 def _count_kernel(
-    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
-    points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
-    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    energy_slices: UnsafePointer[MatrixEnergySlice, MutAnyOrigin],
+    points: UnsafePointer[MatrixPoint, MutAnyOrigin],
+    groups: UnsafePointer[MatrixGroup, MutAnyOrigin],
     slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
     slice_values: UnsafePointer[Float64, MutAnyOrigin],
     group_count: Int,
@@ -366,17 +362,17 @@ def _count_kernel(
     slice_entry_counts: UnsafePointer[UInt32, MutAnyOrigin],
 ):
     var thread = thread_idx.x
-    var group_index = global_idx.x // FDCB_MATRIX_BLOCK_SIZE
+    var group_index = global_idx.x // MATRIX_BLOCK_SIZE
     if group_index >= group_count:
         return
     var group = groups[group_index].copy()
     var minimum_shared = stack_allocation[
-        FDCB_MATRIX_BLOCK_SIZE,
+        MATRIX_BLOCK_SIZE,
         Float64,
         address_space=AddressSpace.SHARED,
     ]()
     var subgroup_minima = stack_allocation[
-        FDCB_MATRIX_REDUCTION_GROUPS,
+        MATRIX_REDUCTION_GROUPS,
         Float64,
         address_space=AddressSpace.SHARED,
     ]()
@@ -387,8 +383,8 @@ def _count_kernel(
     ]()
     if thread == 0:
         maximum_shared[0] = 0.0
-    var subgroup = thread // FDCB_MATRIX_REDUCTION_GROUP_SIZE
-    var subgroup_lane = thread % FDCB_MATRIX_REDUCTION_GROUP_SIZE
+    var subgroup = thread // MATRIX_REDUCTION_GROUP_SIZE
+    var subgroup_lane = thread % MATRIX_REDUCTION_GROUP_SIZE
     barrier()
     for local_slice in range(Int(group.slice_count)):
         var slice_index = Int(group.slice_offset) + local_slice
@@ -397,7 +393,7 @@ def _count_kernel(
         if dose != 0.0:
             var energy = energy_slices[Int(slice_energy[slice_index])].copy()
             for point in range(
-                thread, Int(energy.point_count), FDCB_MATRIX_BLOCK_SIZE
+                thread, Int(energy.point_count), MATRIX_BLOCK_SIZE
             ):
                 var radius2 = _radius_squared(
                     energy_slices,
@@ -414,14 +410,14 @@ def _count_kernel(
         barrier()
         if subgroup_lane == 0:
             var subgroup_minimum = minimum_shared[thread]
-            for offset in range(1, FDCB_MATRIX_REDUCTION_GROUP_SIZE):
+            for offset in range(1, MATRIX_REDUCTION_GROUP_SIZE):
                 if minimum_shared[thread + offset] < subgroup_minimum:
                     subgroup_minimum = minimum_shared[thread + offset]
             subgroup_minima[subgroup] = subgroup_minimum
         barrier()
         if thread == 0:
             var block_minimum = subgroup_minima[0]
-            for subgroup_index in range(1, FDCB_MATRIX_REDUCTION_GROUPS):
+            for subgroup_index in range(1, MATRIX_REDUCTION_GROUPS):
                 if subgroup_minima[subgroup_index] < block_minimum:
                     block_minimum = subgroup_minima[subgroup_index]
             minimum_shared[0] = block_minimum
@@ -439,12 +435,12 @@ def _count_kernel(
     var maximum = maximum_shared[0]
     var threshold = maximum * group.relative_cutoff
     var count_shared = stack_allocation[
-        FDCB_MATRIX_BLOCK_SIZE,
+        MATRIX_BLOCK_SIZE,
         UInt32,
         address_space=AddressSpace.SHARED,
     ]()
     var subgroup_counts = stack_allocation[
-        FDCB_MATRIX_REDUCTION_GROUPS,
+        MATRIX_REDUCTION_GROUPS,
         UInt32,
         address_space=AddressSpace.SHARED,
     ]()
@@ -454,9 +450,7 @@ def _count_kernel(
         var dose = slice_values[slice_index * 10]
         var energy = energy_slices[Int(slice_energy[slice_index])].copy()
         var count = UInt32(0)
-        for point in range(
-            thread, Int(energy.point_count), FDCB_MATRIX_BLOCK_SIZE
-        ):
+        for point in range(thread, Int(energy.point_count), MATRIX_BLOCK_SIZE):
             var coefficient = 0.0
             if dose != 0.0:
                 coefficient = _contribution(
@@ -474,13 +468,13 @@ def _count_kernel(
         barrier()
         if subgroup_lane == 0:
             var subgroup_count = UInt32(0)
-            for offset in range(FDCB_MATRIX_REDUCTION_GROUP_SIZE):
+            for offset in range(MATRIX_REDUCTION_GROUP_SIZE):
                 subgroup_count += count_shared[thread + offset]
             subgroup_counts[subgroup] = subgroup_count
         barrier()
         if thread == 0:
             var block_count = UInt32(0)
-            for subgroup_index in range(FDCB_MATRIX_REDUCTION_GROUPS):
+            for subgroup_index in range(MATRIX_REDUCTION_GROUPS):
                 block_count += subgroup_counts[subgroup_index]
             slice_entry_counts[slice_index] = block_count
             group_entries += block_count
@@ -491,9 +485,9 @@ def _count_kernel(
 
 
 def _fill_kernel(
-    energy_slices: UnsafePointer[FDCBMatrixEnergySliceV1, MutAnyOrigin],
-    points: UnsafePointer[FDCBMatrixPointV1, MutAnyOrigin],
-    groups: UnsafePointer[FDCBMatrixGroupV1, MutAnyOrigin],
+    energy_slices: UnsafePointer[MatrixEnergySlice, MutAnyOrigin],
+    points: UnsafePointer[MatrixPoint, MutAnyOrigin],
+    groups: UnsafePointer[MatrixGroup, MutAnyOrigin],
     slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
     slice_values: UnsafePointer[Float64, MutAnyOrigin],
     slice_offsets: UnsafePointer[UInt64, MutAnyOrigin],
@@ -504,16 +498,14 @@ def _fill_kernel(
     write_coefficients: UInt32,
 ):
     var thread = thread_idx.x
-    var group_index = global_idx.x // FDCB_MATRIX_FILL_BLOCK_SIZE
+    var group_index = global_idx.x // MATRIX_FILL_BLOCK_SIZE
     if group_index >= group_count:
         return
     var group = groups[group_index].copy()
     var threshold = group_maximum[group_index] * group.relative_cutoff
     var warp = thread // WARP_SIZE
     var lane = thread - warp * WARP_SIZE
-    for local_slice in range(
-        warp, Int(group.slice_count), FDCB_MATRIX_FILL_WARPS
-    ):
+    for local_slice in range(warp, Int(group.slice_count), MATRIX_FILL_WARPS):
         var slice_index = Int(group.slice_offset) + local_slice
         var dose = slice_values[slice_index * 10]
         if dose == 0.0:
@@ -549,63 +541,61 @@ def _fill_kernel(
             output += Int(batch_count)
 
 
-def _validate_matrix_view(view: FDCBMatrixProblemViewV1) raises:
-    if view.version != FDCB_MATRIX_ABI_VERSION_V1:
-        raise Error("unsupported FDCB matrix ABI version")
+def _validate_matrix_view(view: MatrixBuildInput) raises:
     if view.flags & ~(
-        FDCB_MATRIX_FLAG_DEVICE_ONLY
-        | FDCB_MATRIX_FLAG_FORCE_PROCEDURAL
-        | FDCB_MATRIX_DEVICE_ID_MASK
+        MATRIX_FLAG_DEVICE_ONLY
+        | MATRIX_FLAG_FORCE_PROCEDURAL
+        | MATRIX_DEVICE_ID_MASK
     ) != UInt32(0):
-        raise Error("FDCB matrix flags are invalid")
+        raise Error("dose matrix flags are invalid")
     if view.group_count == UInt32(0):
-        raise Error("FDCB matrix requires at least one group")
+        raise Error("dose matrix requires at least one group")
     if view.maximum_group_slices == UInt32(0):
-        raise Error("FDCB matrix maximum group slices must be nonzero")
+        raise Error("dose matrix maximum group slices must be nonzero")
     for index in range(Int(view.energy_slice_count)):
         var energy = view.energy_slices[index].copy()
         if energy.reserved != UInt32(0):
-            raise Error("FDCB matrix energy reserved field must be zero")
+            raise Error("dose matrix energy reserved field must be zero")
         if energy.point_offset + UInt64(energy.point_count) > view.point_count:
-            raise Error("FDCB matrix energy point range is invalid")
+            raise Error("dose matrix energy point range is invalid")
     for index in range(Int(view.group_count)):
         var group = view.groups[index].copy()
         var raw_group = view.raw_groups[index].copy()
         if group.reserved != UInt32(0):
-            raise Error("FDCB matrix group reserved field must be zero")
+            raise Error("dose matrix group reserved field must be zero")
         if group.slice_offset + UInt64(group.slice_count) > view.slice_count:
-            raise Error("FDCB matrix group slice range is invalid")
+            raise Error("dose matrix group slice range is invalid")
         if group.slice_count > view.maximum_group_slices:
-            raise Error("FDCB matrix group exceeds maximum slice count")
+            raise Error("dose matrix group exceeds maximum slice count")
         if raw_group.energy_count != group.slice_count:
-            raise Error("FDCB matrix raw group energy count is invalid")
+            raise Error("dose matrix raw group energy count is invalid")
         if UInt64(raw_group.energy_offset) + UInt64(
             raw_group.energy_count
         ) > UInt64(view.energy_slice_count):
-            raise Error("FDCB matrix raw group energy range is invalid")
+            raise Error("dose matrix raw group energy range is invalid")
     for index in range(Int(view.energy_slice_count)):
         var raw_energy = view.raw_energies[index].copy()
         if raw_energy.energy_slice >= view.energy_slice_count:
-            raise Error("FDCB matrix raw energy index is invalid")
+            raise Error("dose matrix raw energy index is invalid")
         if raw_energy.ddd_table >= view.ddd_table_count:
-            raise Error("FDCB matrix DDD table index is invalid")
+            raise Error("dose matrix DDD table index is invalid")
     for index in range(Int(view.ddd_table_count)):
         var table = view.ddd_tables[index].copy()
         if table.entry_count == UInt32(0):
-            raise Error("FDCB matrix DDD table must not be empty")
+            raise Error("dose matrix DDD table must not be empty")
         if (
             UInt64(table.entry_offset) + UInt64(table.entry_count)
             > view.ddd_entry_count
         ):
-            raise Error("FDCB matrix DDD table range is invalid")
+            raise Error("dose matrix DDD table range is invalid")
 
 
-def build_fdcb_matrix_accelerator_v1(
-    view: FDCBMatrixProblemViewV1,
+def build_device_matrix(
+    view: MatrixBuildInput,
     storage_out: UnsafePointer[
         OpaquePointer[MutExternalOrigin], MutExternalOrigin
     ],
-    result_out: UnsafePointer[FDCBMatrixResultV1, MutExternalOrigin],
+    result_out: UnsafePointer[MatrixBuildResult, MutExternalOrigin],
 ) raises -> Int32:
     var start_ns = perf_counter_ns()
     _validate_matrix_view(view)
@@ -616,65 +606,60 @@ def build_fdcb_matrix_accelerator_v1(
     var table_count = Int(view.ddd_table_count)
     var entry_count = Int(view.ddd_entry_count)
     var device_id = Int(
-        (view.flags & FDCB_MATRIX_DEVICE_ID_MASK)
-        >> FDCB_MATRIX_DEVICE_ID_SHIFT
+        (view.flags & MATRIX_DEVICE_ID_MASK) >> MATRIX_DEVICE_ID_SHIFT
     )
     var context = DeviceContext(device_id=device_id)
     var energy_device_bytes = _copy_bytes_to_device(
         context,
         view.energy_slices.bitcast[UInt8](),
-        energy_count * size_of[FDCBMatrixEnergySliceV1](),
+        energy_count * size_of[MatrixEnergySlice](),
     )
     var point_device_bytes = _copy_bytes_to_device(
         context,
         view.points.bitcast[UInt8](),
-        point_count * size_of[FDCBMatrixPointV1](),
+        point_count * size_of[MatrixPoint](),
     )
     var group_device_bytes = _copy_bytes_to_device(
         context,
         view.groups.bitcast[UInt8](),
-        group_count * size_of[FDCBMatrixGroupV1](),
+        group_count * size_of[MatrixGroup](),
     )
     var raw_energy_device_bytes = _copy_bytes_to_device(
         context,
         view.raw_energies.bitcast[UInt8](),
-        energy_count * size_of[FDCBMatrixRawEnergyV1](),
+        energy_count * size_of[RawMatrixEnergy](),
     )
     var raw_group_device_bytes = _copy_bytes_to_device(
         context,
         view.raw_groups.bitcast[UInt8](),
-        group_count * size_of[FDCBMatrixRawGroupV1](),
+        group_count * size_of[RawMatrixGroup](),
     )
     var table_device_bytes = _copy_bytes_to_device(
         context,
         view.ddd_tables.bitcast[UInt8](),
-        table_count * size_of[FDCBMatrixDDDTableV1](),
+        table_count * size_of[MatrixDepthDoseTable](),
     )
     var entry_device_bytes = _copy_bytes_to_device(
         context,
         view.ddd_entries.bitcast[UInt8](),
-        entry_count * size_of[FDCBMatrixDDDEntryV1](),
+        entry_count * size_of[MatrixDepthDoseEntry](),
     )
     var energy_device = energy_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixEnergySliceV1
+        MatrixEnergySlice
     ]()
-    var point_device = point_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixPointV1
-    ]()
-    var group_device = group_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixGroupV1
-    ]()
+    var point_device = point_device_bytes.unsafe_ptr().bitcast[MatrixPoint]()
+    var group_device = group_device_bytes.unsafe_ptr().bitcast[MatrixGroup]()
     var raw_energy_device = raw_energy_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixRawEnergyV1
+        RawMatrixEnergy
     ]()
     var raw_group_device = raw_group_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixRawGroupV1
+        RawMatrixGroup
     ]()
     var table_device = table_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixDDDTableV1
+        MatrixDepthDoseTable
     ]()
     var entry_device = entry_device_bytes.unsafe_ptr().bitcast[
-        FDCBMatrixDDDEntryV1
+        MatrixDepthDoseEntry
     ]()
     var slice_energy_device = context.enqueue_create_buffer[DType.uint32](
         slice_count
@@ -710,8 +695,8 @@ def build_fdcb_matrix_accelerator_v1(
         slice_energy_device.unsafe_ptr(),
         slice_values_device.unsafe_ptr(),
         slice_dose_device.unsafe_ptr(),
-        grid_dim=ceildiv(raw_work, FDCB_MATRIX_BLOCK_SIZE),
-        block_dim=FDCB_MATRIX_BLOCK_SIZE,
+        grid_dim=ceildiv(raw_work, MATRIX_BLOCK_SIZE),
+        block_dim=MATRIX_BLOCK_SIZE,
     )
     context.enqueue_function[_count_kernel](
         energy_device,
@@ -724,7 +709,7 @@ def build_fdcb_matrix_accelerator_v1(
         group_counts_device.unsafe_ptr(),
         slice_counts_device.unsafe_ptr(),
         grid_dim=group_count,
-        block_dim=FDCB_MATRIX_BLOCK_SIZE,
+        block_dim=MATRIX_BLOCK_SIZE,
     )
     var group_maximum_host = context.enqueue_create_host_buffer[DType.float64](
         group_count
@@ -760,13 +745,10 @@ def build_fdcb_matrix_accelerator_v1(
     var allocation_count = output_count
     if allocation_count == 0:
         allocation_count = 1
-    var device_only = (view.flags & FDCB_MATRIX_FLAG_DEVICE_ONLY) != UInt32(0)
-    var procedural = (
-        device_only
-        and (
-            total_entries > FDCB_MATRIX_MATERIALIZED_ENTRY_LIMIT
-            or (view.flags & FDCB_MATRIX_FLAG_FORCE_PROCEDURAL) != UInt32(0)
-        )
+    var device_only = (view.flags & MATRIX_FLAG_DEVICE_ONLY) != UInt32(0)
+    var procedural = device_only and (
+        total_entries > MATRIX_MATERIALIZED_ENTRY_LIMIT
+        or (view.flags & MATRIX_FLAG_FORCE_PROCEDURAL) != UInt32(0)
     )
     var point_indices_device = context.enqueue_create_buffer[DType.uint16](
         allocation_count
@@ -790,7 +772,7 @@ def build_fdcb_matrix_accelerator_v1(
         coefficients_device.unsafe_ptr(),
         UInt32(0) if procedural else UInt32(1),
         grid_dim=group_count,
-        block_dim=FDCB_MATRIX_FILL_BLOCK_SIZE,
+        block_dim=MATRIX_FILL_BLOCK_SIZE,
     )
     var host_output_count = allocation_count
     if device_only:
@@ -807,7 +789,7 @@ def build_fdcb_matrix_accelerator_v1(
     context.synchronize()
     var fill_done_ns = perf_counter_ns()
     print(
-        "<TIME> FDCB matrix accelerator: count ",
+        "<TIME> dose matrix device: count ",
         Float64(count_done_ns - start_ns) * 1.0e-9,
         " sec fill ",
         Float64(fill_done_ns - count_done_ns) * 1.0e-9,
@@ -815,7 +797,7 @@ def build_fdcb_matrix_accelerator_v1(
         sep="",
     )
     print(
-        "<I> FDCB matrix representation=",
+        "<I> dose matrix representation=",
         "procedural" if procedural else "materialized",
         " entries=",
         total_entries,
@@ -825,14 +807,14 @@ def build_fdcb_matrix_accelerator_v1(
     if procedural:
         stored_device_bytes = (
             total_entries * UInt64(2)
-            + UInt64(energy_count * size_of[FDCBMatrixEnergySliceV1]())
-            + UInt64(point_count * size_of[FDCBMatrixPointV1]())
-            + UInt64(group_count * size_of[FDCBMatrixGroupV1]())
+            + UInt64(energy_count * size_of[MatrixEnergySlice]())
+            + UInt64(point_count * size_of[MatrixPoint]())
+            + UInt64(group_count * size_of[MatrixGroup]())
             + UInt64(slice_count) * UInt64(88)
             + UInt64(8)
         )
     print(
-        "<I> FDCB matrix stored-device-bytes=",
+        "<I> dose matrix stored-device-bytes=",
         stored_device_bytes,
         sep="",
     )
@@ -849,9 +831,9 @@ def build_fdcb_matrix_accelerator_v1(
         stored_slice_groups = slice_groups_device^
         stored_slice_energy = slice_energy_device^
         stored_slice_values = slice_values_device^
-    var storage = alloc[FDCBMatrixStorageV1](1)
+    var storage = alloc[DeviceMatrix](1)
     storage.init_pointee_move(
-        FDCBMatrixStorageV1(
+        DeviceMatrix(
             context^,
             device_only,
             procedural,
@@ -879,8 +861,8 @@ def build_fdcb_matrix_accelerator_v1(
         result_coefficients = storage[].coefficients_device.unsafe_ptr()
     var result_flags = UInt32(0)
     if procedural:
-        result_flags = FDCB_MATRIX_RESULT_PROCEDURAL
-    result_out[] = FDCBMatrixResultV1(
+        result_flags = MATRIX_RESULT_PROCEDURAL
+    result_out[] = MatrixBuildResult(
         total_entries,
         view.slice_count,
         view.group_count,
@@ -896,25 +878,52 @@ def build_fdcb_matrix_accelerator_v1(
     return Int32(0)
 
 
-def fdcb_matrix_build_accelerator_abi_v1(
+def build_device_matrix_from_abi(
     problem_pointer: OpaquePointer[MutExternalOrigin],
     storage_out: UnsafePointer[
         OpaquePointer[MutExternalOrigin], MutExternalOrigin
     ],
-    result_out: UnsafePointer[FDCBMatrixResultV1, MutExternalOrigin],
+    result_out: UnsafePointer[MatrixBuildResult, MutExternalOrigin],
 ) -> Int32:
     try:
-        var view = problem_pointer.bitcast[FDCBMatrixProblemViewV1]()[].copy()
-        return build_fdcb_matrix_accelerator_v1(view, storage_out, result_out)
+        var view = problem_pointer.bitcast[MatrixBuildInput]()[].copy()
+        return build_device_matrix(view, storage_out, result_out)
     except error:
-        print("FDCB matrix accelerator ABI error:", error)
+        print("dose matrix device ABI error:", error)
         return Int32(-1)
 
 
-def fdcb_matrix_storage_destroy_abi_v1(
+def destroy_device_matrix_from_abi(
     storage_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    var storage = storage_pointer.bitcast[FDCBMatrixStorageV1]()
+    var storage = storage_pointer.bitcast[DeviceMatrix]()
     storage.destroy_pointee()
     storage.free()
     return Int32(0)
+
+
+def release_matrix_build_buffers_from_abi(
+    storage_pointer: OpaquePointer[MutExternalOrigin],
+) -> Int32:
+    try:
+        var storage = storage_pointer.bitcast[DeviceMatrix]()
+        var group_maximum = storage[].context.enqueue_create_host_buffer[
+            DType.float64
+        ](1)
+        var group_entry_counts = storage[].context.enqueue_create_host_buffer[
+            DType.uint32
+        ](1)
+        var slice_entry_counts = storage[].context.enqueue_create_host_buffer[
+            DType.uint32
+        ](1)
+        var slice_dose = storage[].context.enqueue_create_host_buffer[
+            DType.float64
+        ](1)
+        storage[].group_maximum = group_maximum^
+        storage[].group_entry_counts = group_entry_counts^
+        storage[].slice_entry_counts = slice_entry_counts^
+        storage[].slice_dose = slice_dose^
+        return Int32(0)
+    except error:
+        print("dose matrix host release ABI error:", error)
+        return Int32(-1)

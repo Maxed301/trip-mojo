@@ -1,5 +1,5 @@
-#ifndef TRIP_MOJO_FDCB_MATRIX_ABI_V1_H
-#define TRIP_MOJO_FDCB_MATRIX_ABI_V1_H
+#ifndef TRIP_MOJO_MATRIX_ABI_H
+#define TRIP_MOJO_MATRIX_ABI_H
 
 #include <stdint.h>
 
@@ -7,30 +7,28 @@
 extern "C" {
 #endif
 
-#define FDCB_MATRIX_ABI_VERSION_V1 1u
-
 enum {
-    FDCB_MATRIX_FLAG_DEVICE_ONLY = 1u << 0,
-    FDCB_MATRIX_FLAG_FORCE_PROCEDURAL = 1u << 1,
-    FDCB_MATRIX_DEVICE_ID_SHIFT = 8,
-    FDCB_MATRIX_DEVICE_ID_MASK = 0xffu << FDCB_MATRIX_DEVICE_ID_SHIFT,
+    MOJO_MATRIX_FLAG_DEVICE_ONLY = 1u << 0,
+    MOJO_MATRIX_FLAG_FORCE_PROCEDURAL = 1u << 1,
+    MOJO_MATRIX_DEVICE_ID_SHIFT = 8,
+    MOJO_MATRIX_DEVICE_ID_MASK = 0xffu << MOJO_MATRIX_DEVICE_ID_SHIFT,
 };
 
 enum {
-    FDCB_MATRIX_RESULT_PROCEDURAL = 1u << 0,
+    MOJO_MATRIX_RESULT_PROCEDURAL = 1u << 0,
 };
 
 typedef struct {
     uint64_t point_offset;
     uint32_t point_count;
     uint32_t reserved;
-} FDCBMatrixEnergySliceV1;
+} MojoMatrixEnergySlice;
 
 typedef struct {
     double x;
     double y;
     double f2_max;
-} FDCBMatrixPointV1;
+} MojoMatrixPoint;
 
 typedef struct {
     uint64_t slice_offset;
@@ -41,7 +39,7 @@ typedef struct {
     double relative_cutoff;
     double point_shift_x;
     double point_shift_y;
-} FDCBMatrixGroupV1;
+} MojoMatrixGroup;
 
 typedef struct {
     uint32_t energy_slice;
@@ -50,7 +48,7 @@ typedef struct {
     double focus_squared;
     double lateral_limit_scale;
     double fallback_scale;
-} FDCBMatrixRawEnergyV1;
+} MojoRawMatrixEnergy;
 
 typedef struct {
     uint32_t energy_offset;
@@ -58,12 +56,12 @@ typedef struct {
     double depth_mm;
     double divergence_x;
     double divergence_y;
-} FDCBMatrixRawGroupV1;
+} MojoRawMatrixGroup;
 
 typedef struct {
     uint32_t entry_offset;
     uint32_t entry_count;
-} FDCBMatrixDDDTableV1;
+} MojoMatrixDepthDoseTable;
 
 typedef struct {
     double depth_cm;
@@ -71,10 +69,9 @@ typedef struct {
     double fwhm1;
     double mixture;
     double fwhm2;
-} FDCBMatrixDDDEntryV1;
+} MojoMatrixDepthDoseEntry;
 
 typedef struct {
-    uint32_t version;
     uint32_t group_count;
     uint32_t energy_slice_count;
     uint32_t maximum_group_slices;
@@ -83,14 +80,14 @@ typedef struct {
     uint32_t ddd_table_count;
     uint32_t flags;
     uint64_t ddd_entry_count;
-    const FDCBMatrixEnergySliceV1 *energy_slices;
-    const FDCBMatrixPointV1 *points;
-    const FDCBMatrixGroupV1 *groups;
-    const FDCBMatrixRawEnergyV1 *raw_energies;
-    const FDCBMatrixRawGroupV1 *raw_groups;
-    const FDCBMatrixDDDTableV1 *ddd_tables;
-    const FDCBMatrixDDDEntryV1 *ddd_entries;
-} FDCBMatrixProblemViewV1;
+    const MojoMatrixEnergySlice *energy_slices;
+    const MojoMatrixPoint *points;
+    const MojoMatrixGroup *groups;
+    const MojoRawMatrixEnergy *raw_energies;
+    const MojoRawMatrixGroup *raw_groups;
+    const MojoMatrixDepthDoseTable *ddd_tables;
+    const MojoMatrixDepthDoseEntry *ddd_entries;
+} MojoMatrixBuildInput;
 
 typedef struct {
     uint64_t entry_count;
@@ -103,16 +100,19 @@ typedef struct {
     const double *slice_dose;
     const uint16_t *point_indices;
     const double *coefficients;
-} FDCBMatrixResultV1;
+} MojoMatrixBuildResult;
 
-typedef struct FDCBMatrixStorageV1 FDCBMatrixStorageV1;
+typedef struct MojoDeviceMatrix MojoDeviceMatrix;
 
-int32_t trip_fdcb_matrix_build_accelerator_v1(
-    const FDCBMatrixProblemViewV1 *problem,
-    FDCBMatrixStorageV1 **storage,
-    FDCBMatrixResultV1 *result);
+int32_t trip_optimizer_build_device_matrix(
+    const MojoMatrixBuildInput *problem,
+    MojoDeviceMatrix **storage,
+    MojoMatrixBuildResult *result);
 
-int32_t trip_fdcb_matrix_storage_destroy_v1(FDCBMatrixStorageV1 *storage);
+int32_t trip_optimizer_destroy_device_matrix(MojoDeviceMatrix *storage);
+
+int32_t trip_optimizer_release_matrix_build_buffers(
+    MojoDeviceMatrix *storage);
 
 #ifdef __cplusplus
 }

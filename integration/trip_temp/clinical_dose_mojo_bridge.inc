@@ -1,22 +1,22 @@
-#include "clinical_dose_abi_v1.h"
+#include "clinical_dose_abi.h"
 
 struct TRPClinicalDoseMojoBuild {
-   ClinicalDoseStateV1 *states;
-   ClinicalDosePositionV1 *positions;
-   ClinicalDoseCTStateV1 *ct_states;
+   ClinicalDoseState *states;
+   ClinicalDosePosition *positions;
+   ClinicalDoseCTState *ct_states;
    int16_t *ct_data;
    double *ct_boundaries;
    double *dose_axis_centers;
    int32_t *voxel_voi;
-   ClinicalDoseGridFieldV1 *grid_fields;
-   ClinicalDoseFieldV1 *fields;
-   ClinicalDoseEnergyV1 *energies;
-   ClinicalDosePointV1 *points;
-   ClinicalDoseDDDTableV1 *ddd_tables;
-   ClinicalDoseDDDEntryV1 *ddd_entries;
-   ClinicalDoseBioTableV1 *bio_tables;
-   ClinicalDoseBioEntryV1 *bio_entries;
-   ClinicalDoseOutputV1 *output;
+   ClinicalDoseGridField *grid_fields;
+   ClinicalDoseField *fields;
+   ClinicalDoseEnergy *energies;
+   ClinicalDosePoint *points;
+   ClinicalDoseDDDTable *ddd_tables;
+   ClinicalDoseDDDEntry *ddd_entries;
+   ClinicalDoseBioTable *bio_tables;
+   ClinicalDoseBioEntry *bio_entries;
+   ClinicalDoseOutput *output;
 };
 
 static void TRPClinicalDoseMojoFree(struct TRPClinicalDoseMojoBuild *b) {
@@ -30,8 +30,8 @@ static void TRPClinicalDoseMojoFree(struct TRPClinicalDoseMojoBuild *b) {
    free(b->output); memset(b, 0, sizeof(*b));
 }
 
-static ClinicalDoseGridV1 TRPClinicalDoseMojoGrid(struct STRPCUBE *c) {
-   ClinicalDoseGridV1 g;
+static ClinicalDoseGrid TRPClinicalDoseMojoGrid(struct STRPCUBE *c) {
+   ClinicalDoseGrid g;
    memset(&g, 0, sizeof(g));
    g.nx = c->nx; g.ny = c->ny; g.nz = c->nz;
    g.x0 = 0.5 * (c->pdx[0] + c->pdx[1]);
@@ -75,7 +75,7 @@ static int TRPClinicalDoseMojoRun(
    struct STRPRBESPCBASE ***rs_base = NULL;
    struct STRPSPCBASE **spc_base = NULL;
    struct Node *node;
-   ClinicalDoseProblemViewV1 p;
+   ClinicalDoseProblem p;
    uint64_t ct_values=0, ct_boundaries=0, point_count=0, ddd_entries=0, bio_entries=0;
    uint32_t fields=0, energies=0, bio_tables=0;
    int rc=0, residual=-1, base_fields=0, dose_algorithm;
@@ -211,8 +211,8 @@ static int TRPClinicalDoseMojoRun(
       for ( node=fb->sLH.lh_Head; node->ln_Succ; node=node->ln_Succ,++base,++fi ) {
          struct STRPFLD *f=(struct STRPFLD*)node;
          struct STRPRST *rst=TRPClinicalDoseMojoRst(f,s,four_d);
-         ClinicalDoseGridFieldV1 *gf=b.grid_fields+fi;
-         ClinicalDoseFieldV1 *of=b.fields+fi;
+         ClinicalDoseGridField *gf=b.grid_fields+fi;
+         ClinicalDoseField *of=b.fields+fi;
          gf->field_index=fi;
          for ( int r=0; r<3; ++r ) for ( int col=0; col<4; ++col )
             gf->patient_to_gantry[r*4+col]=f->dvPatient2Gantry[r][col];
@@ -227,14 +227,14 @@ static int TRPClinicalDoseMojoRun(
          of->scanner_y=rst->sScC.dvScannerDistancexy[YY];
          for ( int e=0; e<rst->nB; ++e,++eo ) {
             struct STRPRSTSLICE *slice=rst->psRS+e; struct STRPDDD *ddd=&slice->sDDD;
-            ClinicalDoseEnergyV1 *oe=b.energies+eo;
+            ClinicalDoseEnergy *oe=b.energies+eo;
             oe->point_offset=(uint32_t)po; oe->point_count=(uint32_t)slice->nPnt;
             oe->ddd_table=eo; oe->bio_table_offset=bto; oe->focus=slice->dF;
             oe->range_shifter=slice->sRSh.dThick;
             oe->window_x0=slice->sWdwLat.dvLim[XX][FR]; oe->window_x1=slice->sWdwLat.dvLim[XX][TO];
             oe->window_y0=slice->sWdwLat.dvLim[YY][FR]; oe->window_y1=slice->sWdwLat.dvLim[YY][TO];
             for ( int q=0; q<slice->nPnt; ++q,++po ) {
-               struct STRPRSTPNT *rp=slice->psPnt+q; ClinicalDosePointV1 *op=b.points+po;
+               struct STRPRSTPNT *rp=slice->psPnt+q; ClinicalDosePoint *op=b.points+po;
                op->x=rp->dv[XX]; op->y=rp->dv[YY]; op->delta_z=rp->dvDelta[ZZ];
                op->f2_max=rp->dF2Max;
                op->particles=(rp->ulFlag&TRPRSTPNT_INSIDE) && rp->dN>DBL_EPSILON ?
@@ -244,7 +244,7 @@ static int TRPClinicalDoseMojoRun(
             b.ddd_tables[eo].entry_count=(uint32_t)ddd->nz;
             b.ddd_tables[eo].column_count=(uint32_t)ddd->nCol;
             for ( int z=0; z<ddd->nz; ++z,++ddo ) {
-               ClinicalDoseDDDEntryV1 *od=b.ddd_entries+ddo;
+               ClinicalDoseDDDEntry *od=b.ddd_entries+ddo;
                od->z_cm=ddd->pdTab[TRPDDD_X][z]; od->dose=ddd->pdTab[TRPDDD_D][z];
                if ( ddd->nCol>2 ) { od->fwhm1=ddd->pdTab[TRPDDD_FWHM1][z];
                   od->mix=ddd->pdTab[TRPDDD_G][z]; od->fwhm2=ddd->pdTab[TRPDDD_FWHM2][z]; }
@@ -257,7 +257,7 @@ static int TRPClinicalDoseMojoRun(
                b.bio_tables[bto].entry_count=(uint32_t)spc->nz;
                b.bio_tables[bto].z_scale=0.1*spc->dP/slice->dP;
                for ( int z=0; z<spc->nz; ++z,++beo ) {
-                  ClinicalDoseBioEntryV1 *ob=b.bio_entries+beo;
+                  ClinicalDoseBioEntry *ob=b.bio_entries+beo;
                   ob->z_cm=spc->psSD[z].dz; ob->alpha=rbe->psRSD[z].dalpha0x1;
                   ob->sqrt_beta=rbe->psRSD[z].dbeta0x1;
                   ob->let_mix=spc->psSD[z].dvMomLET[0]*spc->psSD[z].dvMomLET[1];
@@ -296,7 +296,6 @@ static int TRPClinicalDoseMojoRun(
       }
       if ( transform_error ) { rc=CMDERR_ERROR|ERRTRPDOSE_PNTTRAFOFAILED; goto done; }
    }
-   p.version=CLINICAL_DOSE_VERSION_V1;
    p.flags=(biological?CLINICAL_DOSE_BIOLOGICAL:0) |
       (dose_algorithm==TRPFLDDOSE_MULTIPLESCATTERDIVERGENT?
        CLINICAL_DOSE_DIVERGENT:0);
@@ -322,9 +321,9 @@ static int TRPClinicalDoseMojoRun(
    p.bio_tables=b.bio_tables; p.bio_entries=b.bio_entries;
    p.transformed_voxel_count=four_d?voxels*(uint64_t)states:0;
    p.states=four_d?b.states:NULL; p.transformed_voxels=b.positions;
-   fprintf(stderr,"<I> Mojo clinical dose: backend=accelerator states=%d voxels=%llu fields=%u\n",
+   fprintf(stderr,"<I> Mojo clinical dose: backend=device states=%d voxels=%llu fields=%u\n",
            states,(unsigned long long)voxels,fields);
-   rc=trip_clinical_dose_compute_accelerator_v1(&p,b.output,voxels);
+   rc=trip_compute_clinical_dose_on_device(&p,b.output,voxels);
    if ( rc ) { fprintf(stderr,"<E> Mojo clinical dose ABI failed: %d\n",rc);
       rc=CMDERR_ERROR|ERRTRPDOSE_BADFIELD; goto done; }
    double norm[TRPDOSE_MAX]; TRPDoseSetNorm(dc,norm);
