@@ -12,6 +12,8 @@ from std.time import perf_counter_ns
 
 comptime FDCB_MATRIX_ABI_VERSION_V1 = UInt32(1)
 comptime FDCB_MATRIX_FLAG_DEVICE_ONLY = UInt32(1)
+comptime FDCB_MATRIX_DEVICE_ID_SHIFT = 8
+comptime FDCB_MATRIX_DEVICE_ID_MASK = UInt32(0xFF00)
 comptime FDCB_MATRIX_BLOCK_SIZE = 128
 comptime FDCB_MATRIX_FILL_BLOCK_SIZE = 128
 comptime FDCB_MATRIX_FILL_WARPS = FDCB_MATRIX_FILL_BLOCK_SIZE // WARP_SIZE
@@ -536,7 +538,9 @@ def _fill_kernel(
 def _validate_matrix_view(view: FDCBMatrixProblemViewV1) raises:
     if view.version != FDCB_MATRIX_ABI_VERSION_V1:
         raise Error("unsupported FDCB matrix ABI version")
-    if view.flags & ~FDCB_MATRIX_FLAG_DEVICE_ONLY != UInt32(0):
+    if view.flags & ~(
+        FDCB_MATRIX_FLAG_DEVICE_ONLY | FDCB_MATRIX_DEVICE_ID_MASK
+    ) != UInt32(0):
         raise Error("FDCB matrix flags are invalid")
     if view.group_count == UInt32(0):
         raise Error("FDCB matrix requires at least one group")
@@ -595,7 +599,11 @@ def build_fdcb_matrix_accelerator_v1(
     var slice_count = Int(view.slice_count)
     var table_count = Int(view.ddd_table_count)
     var entry_count = Int(view.ddd_entry_count)
-    var context = DeviceContext()
+    var device_id = Int(
+        (view.flags & FDCB_MATRIX_DEVICE_ID_MASK)
+        >> FDCB_MATRIX_DEVICE_ID_SHIFT
+    )
+    var context = DeviceContext(device_id=device_id)
     var energy_device_bytes = _copy_bytes_to_device(
         context,
         view.energy_slices.bitcast[UInt8](),

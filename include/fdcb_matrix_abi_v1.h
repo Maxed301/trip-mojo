@@ -11,6 +11,8 @@ extern "C" {
 
 enum {
     FDCB_MATRIX_FLAG_DEVICE_ONLY = 1u << 0,
+    FDCB_MATRIX_DEVICE_ID_SHIFT = 8,
+    FDCB_MATRIX_DEVICE_ID_MASK = 0xffu << FDCB_MATRIX_DEVICE_ID_SHIFT,
 };
 
 typedef struct {

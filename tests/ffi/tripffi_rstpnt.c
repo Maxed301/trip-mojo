@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "trprst.h"
@@ -73,7 +74,10 @@ double tripffi_dedx_eval(
     int a,
     double energy
 ) {
-    const char *path = "/home/max/Projects/TRIP_DATA/Basedata/GSI/carbon/20040607.dedx";
+    const char *path = getenv("TRIPFFI_DEDX_PATH");
+    if (path == NULL) {
+        return -1.0;
+    }
     struct STRPDEDX dedx;
     TRPdEdxInit(&dedx, 0);
     int rc = TRPdEdxRead(&dedx, path, TRPDEDX_QUIET);

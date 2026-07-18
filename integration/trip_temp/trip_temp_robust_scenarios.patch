@@ -1,0 +1,12 @@
+diff --git a/trpcmdfld.c b/trpcmdfld.c
+--- a/trpcmdfld.c
++++ b/trpcmdfld.c
+@@ -962,7 +962,7 @@ struct SCMDERR TRPCmdFld(
+       if(!*pcRobustPosShift) {
+          ulFlagFldTmp = TRPFLDROBSCENSETUP_RANGEONLY;
+       } else if (*plRobustAddPermutations && *plRobustDiagonalPositionShift) {
+-         ulFlagFld = TRPFLDROBSCENSETUP_EXTENDEDDIAG;
++         ulFlagFldTmp = TRPFLDROBSCENSETUP_EXTENDEDDIAG;
+       } else if ( !(*plRobustAddPermutations) && *plRobustDiagonalPositionShift ) {
+          ulFlagFldTmp= TRPFLDROBSCENSETUP_DIAG;
+       } else if ( *plRobustAddPermutations && !(*plRobustDiagonalPositionShift) ) {

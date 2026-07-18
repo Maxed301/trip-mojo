@@ -13,7 +13,6 @@ enum {
     FDCB_FLAG_BIOLOGICAL = 1u << 1,
     FDCB_FLAG_INITIALIZE = 1u << 2,
     FDCB_FLAG_DEVICE_BOOTSTRAP = 1u << 3,
-    FDCB_FLAG_TRACE = 1u << 4,
     FDCB_PRECISION_REFERENCE = 1,
     FDCB_PRECISION_MIXED32 = 2,
     FDCB_MIN_PARTICLE_DISABLED = 0,
@@ -27,9 +26,8 @@ enum {
     FDCB_RESULT_FINAL_MIN_PARTICLES_APPLIED = 1u << 0
 };
 
-/* CPU entry points accept REFERENCE only. Accelerator entry points accept the
- * mode selected when their library was built; mixed32 is explicit and
- * experimental, never an implicit downgrade of a reference problem.
+/* Production CPU and accelerator entry points accept REFERENCE only.
+ * FDCB_PRECISION_MIXED32 remains reserved for ABI compatibility.
  */
 
 /* Field slices are grouped by contiguous field_index values starting at zero.
@@ -196,9 +194,24 @@ int32_t trip_fdcb_matrix_problem_storage_create_v1(
     FDCBWritableArraysV1 *arrays_out
 );
 
+int32_t trip_fdcb_matrix_problem_storage_create_accelerators_v1(
+    const FDCBProblemViewV1 *problem_template,
+    struct FDCBMatrixStorageV1 *const *matrix_storages,
+    const uint64_t *matrix_entry_counts,
+    const uint64_t *voxel_offsets,
+    const uint64_t *voxel_counts,
+    uint32_t device_count,
+    FDCBProblemStorageV1 **storage_out,
+    FDCBWritableArraysV1 *arrays_out
+);
+
 int32_t trip_fdcb_storage_destroy_v1(FDCBProblemStorageV1 *storage);
 
 int32_t trip_fdcb_matrix_problem_storage_destroy_v1(
+    FDCBProblemStorageV1 *storage
+);
+
+int32_t trip_fdcb_matrix_problem_storage_destroy_accelerators_v1(
     FDCBProblemStorageV1 *storage
 );
 
@@ -216,7 +229,7 @@ int32_t trip_fdcb_storage_optimize_v1(
     FDCBResultV1 *result_out
 );
 
-/* Returns -3 unless built with FDCB_ABI_ACCELERATOR=true and a GPU target. */
+/* Returns -3 when the library was built without an available accelerator. */
 int32_t trip_fdcb_storage_optimize_accelerator_v1(
     FDCBProblemStorageV1 *storage,
     double *particles_out,
@@ -240,6 +253,13 @@ int32_t trip_fdcb_matrix_problem_optimize_accelerator_v1(
     FDCBResultV1 *result_out
 );
 
+int32_t trip_fdcb_matrix_problem_optimize_accelerators_v1(
+    FDCBProblemStorageV1 *storage,
+    double *particles_out,
+    uint64_t particles_out_count,
+    FDCBResultV1 *result_out
+);
+
 int32_t trip_fdcb_evaluate_v1(
     const FDCBProblemViewV1 *problem,
     double *gradient_out,
@@ -254,7 +274,7 @@ int32_t trip_fdcb_optimize_v1(
     FDCBResultV1 *result_out
 );
 
-/* Returns -3 unless built with FDCB_ABI_ACCELERATOR=true and a GPU target. */
+/* Returns -3 when the library was built without an available accelerator. */
 int32_t trip_fdcb_optimize_accelerator_v1(
     const FDCBProblemViewV1 *problem,
     double *particles_out,

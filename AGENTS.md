@@ -26,20 +26,19 @@ This repo is a portable Mojo implementation of the TRiP FDCB optimizer.
 
 - Sole TRiP source and CPU truth: the clean local `~/Projects/trip_temp`
   checkout at commit
-  `1fb423f`. Hydra's `/lustre/bio/mdick/CUDA/trip_temp` uses that same commit
+  `1fb423f`. The cluster's `${ROOT}/trip_temp` uses that same commit
   plus only the optimizer and clinical-dose patches under
   `integration/trip_temp`, applied once for the persistent headless Mojo-linked
   build. Never inspect or use `trip4d` or
   `trip-gpu`; if `trip_temp` is missing or unsuitable, stop and report that
   problem instead of substituting another tree.
-- Clinical/case inputs on Hydra: `/lustre/bio/mdick/CUDA/TRIP_DATA`. The P101
+- Clinical/case inputs on the cluster: `${ROOT}/TRIP_DATA`. The P101
   4D robust case lives under `TRIP_DATA/P101_4Dopt`; do not read case inputs
   from a TRiP source checkout.
-- The ARC reference exec is `/lustre/bio/lvolz/CAK257/arc.exec`. Its input data
-  stays under `/lustre/bio`; write all generated plans, dose and logs under
-  `/lustre/bio/mdick/CUDA/PROFILES/trip-mojo`.
+- ARC plans and patient input data are supplied by the operator; write all
+  generated plans, dose and logs under `${ROOT}/PROFILES/trip-mojo`.
 - Portable implementation: `~/Projects/trip-mojo` locally and
-  `/lustre/bio/mdick/CUDA/trip-mojo` on Hydra.
+  `${ROOT}/trip-mojo` on the cluster.
 
 ## Engineering priorities
 

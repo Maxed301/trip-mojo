@@ -2,25 +2,69 @@
 #include "fdcb_matrix_abi_v1.h"
 #include <malloc.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 static int gFDCBMojoFinalMinimumApplied = 0;
 
+__attribute__((constructor))
+static void FDCBMojoConfigureAllocator(void) {
+   setenv("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_CHUNK_PERCENT", "90", 1);
+   setenv("MODULAR_DEVICE_CONTEXT_MEMORY_MANAGER_SIZE_PERCENT", "90", 1);
+}
+
 static int FDCBMojoPackThreads(void) {
-   const char *value = getenv("TRIP_FDCB_MOJO_PACK_THREADS");
-   char *end = NULL;
-   long threads;
-   if ( value == NULL || *value == '\0' ) return 12;
-   threads = strtol(value, &end, 10);
-   if ( *end != '\0' || threads < 1 || threads > 256 ) return 12;
-   return (int) threads;
+   int threads = omp_get_max_threads() / 2;
+   if ( threads < 1 ) return 1;
+   return threads > 32 ? 32 : threads;
+}
+
+static int FDCBMojoDeviceListCount(const char *value) {
+   int count = 1;
+   if ( value == NULL || *value == '\0' || !strcmp(value, "NoDevFiles") )
+      return 0;
+   for ( const char *cursor = value; *cursor != '\0'; ++cursor )
+      if ( *cursor == ',' ) ++count;
+   return count;
 }
 
 static int FDCBMojoDeviceCount(void) {
-   const char *value = getenv("TRIP_FDCB_MOJO_DEVICES");
-   if ( value == NULL || !strcmp(value, "1") ) return 1;
-   if ( !strcmp(value, "2") ) return 2;
-   if ( !strcmp(value, "3") ) return 3;
-   return 0;
+   const char *value = getenv("ROCR_VISIBLE_DEVICES");
+   int count = FDCBMojoDeviceListCount(value);
+   if ( count == 0 ) {
+      value = getenv("HIP_VISIBLE_DEVICES");
+      count = FDCBMojoDeviceListCount(value);
+   }
+   if ( count == 0 ) {
+      value = getenv("CUDA_VISIBLE_DEVICES");
+      count = FDCBMojoDeviceListCount(value);
+   }
+   if ( count == 0 ) {
+      value = getenv("SLURM_GPUS_ON_NODE");
+      if ( value != NULL && *value != '\0' ) {
+         char *end = NULL;
+         long configured = strtol(value, &end, 10);
+         if ( *end == '\0' && configured >= 1 && configured <= 3 )
+            count = (int) configured;
+      }
+   }
+   return count == 0 ? 1 : count;
+}
+
+static int FDCBMojoUsesNvidiaRuntime(void) {
+   const char *rocr = getenv("ROCR_VISIBLE_DEVICES");
+   const char *hip = getenv("HIP_VISIBLE_DEVICES");
+   if ( (rocr != NULL && *rocr != '\0') ||
+        (hip != NULL && *hip != '\0') ) return 0;
+   if ( access("/proc/driver/nvidia/version", R_OK) == 0 ) return 1;
+   {
+      const char *cuda = getenv("CUDA_VISIBLE_DEVICES");
+      return cuda != NULL && *cuda != '\0' && strcmp(cuda, "NoDevFiles");
+   }
+}
+
+static int FDCBMojoUsesDeviceMatrix(void) {
+   return FDCBMojoUsesNvidiaRuntime();
 }
 
 static void FDCBMojoMatrixReleaseArenas(void);
@@ -33,6 +77,15 @@ static int FDCBMojoMatrixDirectView(
    uint16_t **point_indices, uint64_t *entry_count);
 static void FDCBMojoMatrixTransferDirectStorage(
    FDCBMatrixStorageV1 *storage);
+static int FDCBMojoMatrixDirectViews(
+   uint32_t device_count, FDCBMatrixStorageV1 **storages,
+   double **coefficients, uint16_t **point_indices,
+   uint64_t *entry_counts, uint64_t *voxel_offsets,
+   uint64_t *voxel_counts);
+static int FDCBMojoMatrixDirectSlice(
+   const struct STRPFLDDOSE *dose, int voxel,
+   const struct STRPFLDDOSECORRSLICE *slice, uint64_t *offset);
+static int FDCBMojoMatrixDoseDevice(const struct STRPFLDDOSE *dose);
 
 static struct STRPOPTVOX *FDCBMojoScenarioVoxel(
    struct STRPOPT *opt, int voxel, uint32_t scenario
@@ -103,6 +156,12 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    double *matrix_coefficients = NULL;
    uint16_t *matrix_point_indices = NULL;
    uint64_t matrix_entry_count = 0;
+   FDCBMatrixStorageV1 *matrix_storages[3] = {NULL, NULL, NULL};
+   double *matrix_coefficients_by_device[3] = {NULL, NULL, NULL};
+   uint16_t *matrix_point_indices_by_device[3] = {NULL, NULL, NULL};
+   uint64_t matrix_entry_counts[3] = {0, 0, 0};
+   uint64_t matrix_voxel_offsets[3] = {0, 0, 0};
+   uint64_t matrix_voxel_counts[3] = {0, 0, 0};
    pthread_t trim_thread;
    double trim_seconds = 0.0;
    int trim_started = 0;
@@ -116,17 +175,15 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    memset(&problem, 0, sizeof(problem));
    memset(&arrays, 0, sizeof(arrays));
    memset(&result, 0, sizeof(result));
-   if ( device_count == 0 ) {
-      fprintf(stderr, "<E> TRIP_FDCB_MOJO_DEVICES must be 1, 2 or 3\n");
+   if ( device_count < 1 || device_count > 3 ) {
+      fprintf(stderr, "<E> Mojo FDCB supports one, two or three visible devices\n");
       goto done;
    }
    gFDCBMojoFinalMinimumApplied = 0;
    problem.version = FDCB_ABI_VERSION_V1;
    problem.flags = FDCB_FLAG_INITIALIZE;
-   device_bootstrap =
-      getenv("TRIP_FDCB_MOJO_DEVICE_BOOTSTRAP") != NULL;
+   device_bootstrap = FDCBMojoUsesDeviceMatrix() || device_count > 1;
    if ( device_bootstrap ) problem.flags |= FDCB_FLAG_DEVICE_BOOTSTRAP;
-   if ( getenv("TRIP_FDCB_MOJO_TRACE") ) problem.flags |= FDCB_FLAG_TRACE;
    if ( opt->ulFlag & TRPOPT_BIO ) problem.flags |= FDCB_FLAG_BIOLOGICAL;
    if ( opt->ulFlag & TRPOPT_ROBUST_INCLUDE_DMAX )
       problem.flags |= FDCB_FLAG_ROBUST_INCLUDE_DMAX;
@@ -236,30 +293,79 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
       }
    FDCBMojoMatrixDiscardUnreferencedArenas();
 
-   if ( getenv("TRIP_FDCB_MOJO_DIRECT") != NULL ) {
-      if ( device_count != 1 ) {
-         fprintf(stderr, "<E> direct Mojo matrix is single-device only\n");
+   if ( FDCBMojoUsesDeviceMatrix() ) {
+      if ( device_count == 1 ) {
+         if ( FDCBMojoMatrixDirectView(&matrix_storage, &matrix_coefficients,
+                                      &matrix_point_indices,
+                                      &matrix_entry_count) != 0 ) {
+            fprintf(stderr,
+                    "<E> direct Mojo optimizer requires one matrix arena\n");
+            goto done;
+         }
+         problem.coefficient_count = matrix_entry_count;
+      } else if ( FDCBMojoMatrixDirectViews(
+                     (uint32_t) device_count, matrix_storages,
+                     matrix_coefficients_by_device,
+                     matrix_point_indices_by_device, matrix_entry_counts,
+                     matrix_voxel_offsets, matrix_voxel_counts) != 0 ) {
+         fprintf(stderr,
+                 "<E> direct Mojo optimizer requires one arena per device\n");
          goto done;
+      } else {
+         memset(matrix_voxel_offsets, 0, sizeof(matrix_voxel_offsets));
+         memset(matrix_voxel_counts, 0, sizeof(matrix_voxel_counts));
+         for ( int voxel = 0; voxel < opt->nV; ++voxel ) {
+            int owner = -1;
+            for ( uint32_t scenario = 0; scenario < problem.scenario_count;
+                  ++scenario ) {
+               struct STRPOPTVOX *source = FDCBMojoScenarioVoxel(
+                  opt, voxel, scenario);
+               for ( int field = 0; field < opt->nF; ++field ) {
+                  int device = FDCBMojoMatrixDoseDevice(source->psFD + field);
+                  if ( device < 0 || (owner >= 0 && device != owner) ) {
+                     fprintf(stderr,
+                             "<E> optimizer voxel spans Mojo matrix devices\n");
+                     goto done;
+                  }
+                  owner = device;
+               }
+            }
+            if ( owner < 0 || owner >= device_count ||
+                 (matrix_voxel_counts[owner] != 0 &&
+                  matrix_voxel_offsets[owner] +
+                     matrix_voxel_counts[owner] != (uint64_t) voxel) ) {
+               fprintf(stderr,
+                       "<E> compact Mojo matrix device ownership is invalid\n");
+               goto done;
+            }
+            if ( matrix_voxel_counts[owner] == 0 )
+               matrix_voxel_offsets[owner] = (uint64_t) voxel;
+            ++matrix_voxel_counts[owner];
+         }
+         problem.coefficient_count = 0;
+         for ( int device = 0; device < device_count; ++device )
+            problem.coefficient_count += matrix_entry_counts[device];
       }
-      if ( FDCBMojoMatrixDirectView(&matrix_storage, &matrix_coefficients,
-                                    &matrix_point_indices,
-                                    &matrix_entry_count) != 0 ) {
-         fprintf(stderr, "<E> direct Mojo optimizer requires one matrix arena\n");
-         goto done;
-      }
-      problem.coefficient_count = matrix_entry_count;
       direct_matrix = 1;
    }
 
    phase = omp_get_wtime();
-   if ( direct_matrix )
+   if ( direct_matrix && device_count == 1 )
       rc = trip_fdcb_matrix_problem_storage_create_v1(
          &problem, matrix_storage, &storage, &arrays);
+   else if ( direct_matrix )
+      rc = trip_fdcb_matrix_problem_storage_create_accelerators_v1(
+         &problem, matrix_storages, matrix_entry_counts,
+         matrix_voxel_offsets, matrix_voxel_counts, (uint32_t) device_count,
+         &storage, &arrays);
    else
       rc = trip_fdcb_storage_create_v1(&problem, &storage, &arrays);
    if ( rc ) goto done;
-   if ( direct_matrix )
+   if ( direct_matrix && device_count == 1 )
       FDCBMojoMatrixTransferDirectStorage(matrix_storage);
+   else if ( direct_matrix )
+      for ( int device = 0; device < device_count; ++device )
+         FDCBMojoMatrixTransferDirectStorage(matrix_storages[device]);
    fprintf(stderr, "<TIME> FDCB Mojo pack allocate: %.6f sec\n",
            omp_get_wtime() - phase);
    memcpy(arrays.rng_state, rng_state, sizeof(rng_state));
@@ -357,13 +463,10 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
                         field_base[field] + (uint32_t) beam;
                      output->reserved = 0;
                      if ( direct_matrix ) {
-                        uint64_t direct_offset = (uint64_t)
-                           (input->sFDCP.pdG - matrix_coefficients);
-                        if ( input->sFDCP.nPnt > matrix_entry_count ||
-                             direct_offset >
-                                matrix_entry_count - input->sFDCP.nPnt ||
-                             input->sFDCP.piPnt !=
-                             matrix_point_indices + direct_offset ) {
+                        uint64_t direct_offset;
+                        if ( FDCBMojoMatrixDirectSlice(
+                                source->psFD + field, voxel, input,
+                                &direct_offset) != 0 ) {
 #pragma omp atomic write
                            direct_pack_error = 1;
                            continue;
@@ -411,8 +514,11 @@ static int TRPOptFDCBMojoRun(struct STRPOPT *opt,
    if ( output_particles == NULL ) goto done;
    fprintf(stderr, "<I> FDCB Mojo accelerator devices=%d\n", device_count);
    phase = omp_get_wtime();
-   if ( direct_matrix )
+   if ( direct_matrix && device_count == 1 )
       rc = trip_fdcb_matrix_problem_optimize_accelerator_v1(
+         storage, output_particles, point_count, &result);
+   else if ( direct_matrix )
+      rc = trip_fdcb_matrix_problem_optimize_accelerators_v1(
          storage, output_particles, point_count, &result);
    else if ( device_count > 1 )
       rc = trip_fdcb_storage_optimize_accelerators_v1(
@@ -456,8 +562,10 @@ done:
    free(coefficient_offsets);
    free(output_particles);
    if ( storage ) {
-      if ( direct_matrix )
+      if ( direct_matrix && device_count == 1 )
          trip_fdcb_matrix_problem_storage_destroy_v1(storage);
+      else if ( direct_matrix )
+         trip_fdcb_matrix_problem_storage_destroy_accelerators_v1(storage);
       else
          trip_fdcb_storage_destroy_v1(storage);
    }

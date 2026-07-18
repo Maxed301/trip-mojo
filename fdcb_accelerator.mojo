@@ -9,7 +9,6 @@ from std.gpu.memory import AddressSpace
 from std.gpu.primitives import warp
 from std.math import sqrt
 from std.memory import bitcast, stack_allocation
-from std.sys import get_defined_bool, get_defined_int
 
 from fdcb_problem import (
     FDCBProblemV1,
@@ -25,10 +24,8 @@ from fdcb_matrix_accelerator import FDCBMatrixStorageV1
 comptime FDCB_ACCELERATOR_BLOCK_SIZE = 128
 comptime FDCB_REDUCTION_BLOCK_SIZE = 256
 comptime FDCB_SPARSE_GROUP_SIZE = 32
-comptime FDCB_ACCELERATOR_MIXED32 = get_defined_bool["FDCB_MIXED32", False]()
-comptime FDCB_ACCELERATOR_HOST_THREADS = get_defined_int[
-    "FDCB_PACK_THREADS", 12
-]()
+comptime FDCB_ACCELERATOR_MIXED32 = False
+comptime FDCB_ACCELERATOR_HOST_THREADS = 16
 comptime FDCB_ACCELERATOR_DTYPE = (
     DType.float32 if FDCB_ACCELERATOR_MIXED32 else DType.float64
 )
@@ -207,10 +204,12 @@ def _copy_list_range_to_device[
     values: List[Scalar[dtype]],
     offset: Int,
     count: Int,
+    synchronize: Bool = True,
 ) raises -> DeviceBuffer[dtype]:
     var device = context.enqueue_create_buffer[dtype](count)
     context.enqueue_copy[dtype](device, values.unsafe_ptr() + offset)
-    context.synchronize()
+    if synchronize:
+        context.synchronize()
     return device^
 
 
@@ -219,6 +218,7 @@ def _copy_coefficient_range_to_device(
     values: List[Float64],
     offset: Int,
     count: Int,
+    synchronize: Bool = True,
 ) raises -> DeviceBuffer[FDCB_ACCELERATOR_DTYPE]:
     comptime if FDCB_ACCELERATOR_MIXED32:
         var host = context.enqueue_create_host_buffer[FDCB_ACCELERATOR_DTYPE](
@@ -232,7 +232,8 @@ def _copy_coefficient_range_to_device(
             count
         )
         context.enqueue_copy(device, host)
-        context.synchronize()
+        if synchronize:
+            context.synchronize()
         return device^
     else:
         var device = context.enqueue_create_buffer[FDCB_ACCELERATOR_DTYPE](
@@ -242,7 +243,8 @@ def _copy_coefficient_range_to_device(
             Scalar[FDCB_ACCELERATOR_DTYPE]
         ]()
         context.enqueue_copy[FDCB_ACCELERATOR_DTYPE](device, source)
-        context.synchronize()
+        if synchronize:
+            context.synchronize()
         return device^
 
 
@@ -1414,6 +1416,7 @@ struct FDCBAccelerator(Movable):
         voxel_offset: Int,
         voxel_count: Int,
         validate_problem: Bool,
+        defer_upload_sync: Bool = False,
     ) raises:
         self = FDCBAccelerator(
             problem,
@@ -1423,6 +1426,7 @@ struct FDCBAccelerator(Movable):
             voxel_offset,
             voxel_count,
             validate_problem,
+            defer_upload_sync,
         )
 
     def __init__[
@@ -1454,6 +1458,7 @@ struct FDCBAccelerator(Movable):
         voxel_offset: Int,
         voxel_count: Int,
         validate_problem: Bool,
+        defer_upload_sync: Bool = False,
     ) raises:
         if validate_problem:
             comptime if FDCB_ACCELERATOR_MIXED32:
@@ -1480,12 +1485,6 @@ struct FDCBAccelerator(Movable):
             or (voxel_offset + voxel_count > len(problem.voxels))
         ):
             raise Error("invalid FDCB accelerator voxel shard")
-        if external_coefficient_count > 0 and (
-            device_id != 0
-            or voxel_offset != 0
-            or voxel_count != len(problem.voxels)
-        ):
-            raise Error("external accelerator matrix cannot be sharded")
         if external_coefficient_count > 0:
             comptime if FDCB_ACCELERATOR_MIXED32:
                 raise Error(
@@ -1522,6 +1521,7 @@ struct FDCBAccelerator(Movable):
         self.slice_count = slice_end - slice_offset
         self.coefficient_count = coefficient_end - coefficient_offset
         if external_coefficient_count > 0:
+            coefficient_offset = 0
             self.coefficient_count = external_coefficient_count
         self.point_count = len(problem.particles)
         self.voxel_count = voxel_count
@@ -1542,12 +1542,14 @@ struct FDCBAccelerator(Movable):
                 problem.coefficient_point_indices,
                 coefficient_offset,
                 self.coefficient_count,
+                not defer_upload_sync,
             )
             coefficient_device = _copy_coefficient_range_to_device(
                 self.context,
                 problem.coefficients,
                 coefficient_offset,
                 self.coefficient_count,
+                not defer_upload_sync,
             )
         var metric_count = self.voxel_count
         if self.point_count > metric_count:
@@ -1814,6 +1816,9 @@ struct FDCBAccelerator(Movable):
         self.context.enqueue_copy(self.slice_factors, slice_factor_host)
         self.context.enqueue_copy(self.voxel_data, voxel_host)
         self.context.enqueue_copy(self.scenario_indices, voxel_index_host)
+
+    def synchronize(mut self) raises:
+        self.context.synchronize()
 
     def _enqueue_particles(mut self, particles: List[Float64]) raises:
         if len(particles) != self.point_count:

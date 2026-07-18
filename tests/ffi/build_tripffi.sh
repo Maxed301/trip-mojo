@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-trip_dir="${TRIP_DIR:-/home/max/Projects/trip_temp}"
+trip_dir="${TRIP_DIR:?set TRIP_DIR to your trip_temp source checkout}"
 out_dir="$repo_dir/build/ffi"
 
 mkdir -p "$out_dir"

@@ -44,21 +44,24 @@ diff --git a/trpopt.c b/trpopt.c
        }
 -      if(psOpt->ulFlag & TRPOPT_COMPLEXMINPART) {
 +      if((psOpt->ulFlag & TRPOPT_COMPLEXMINPART) &&
-+         !(getenv("TRIP_FDCB_MOJO") && gFDCBMojoFinalMinimumApplied)) {
++         !gFDCBMojoFinalMinimumApplied) {
           // eliminate any left-over points not meeting the min particle criterion
           for(int iF=0;iF < psOpt->nF; ++iF) {
              if(psOpt->psOF[iF].psF->psMasterField == NULL) {
-@@ -1669,7 +1672,9 @@ int TRPOptOptimize ( struct STRPOPT *psOpt,
+@@ -1669,12 +1672,8 @@ int TRPOptOptimize ( struct STRPOPT *psOpt,
        break;
        case TRPOPTALG_FDCB:  
           fprintf( stderr, "<D> optfr with FDCB ...\n" );
 -         if (iAdaptiveLoop==0) {
-+         if ( getenv("TRIP_FDCB_MOJO") ) {
-+            iRC = TRPOptFDCBMojoRun(psOpt, psDC);
-+         } else if (iAdaptiveLoop==0) {
-             iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
-          } else {
-             iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
+-            iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
+-         } else {
+-            iRC = TRPOptCG_FDCS( psOpt, psDC, 1, ulFlag );
+-         }
++         iRC = TRPOptFDCBMojoRun(psOpt, psDC);
+          if ( iRC & CMDERR_MASK ) {
+             sCE.iRC = iRC & ~CMDERR_MASK; goto gError;
+          }
+       break;
 @@ -12867,9 +12872,17 @@ int TRPOptDoseMatrixPhys ( struct STRPOPT      *psOpt,
        sCE.iRC = ERRTRPDOSE_BADALGORITHM; goto gError;
     }
@@ -67,7 +70,7 @@ diff --git a/trpopt.c b/trpopt.c
 -   
 -   
 +
-+   if ( getenv("TRIP_FDCB_MOJO_MATRIX") ) {
++   if ( FDCBMojoUsesDeviceMatrix() ) {
 +      iRC = TRPOptDoseMatrixPhysMojoBuild(psOpt, psFB, psOV, nVoxel,
 +                                          nPreviousVoxels, iDoseAlg);
 +      if ( iRC & CMDERR_MASK ) {
@@ -90,7 +93,7 @@ diff --git a/trpopt.c b/trpopt.c
     }
        
     if(!(psOpt->sVXR.ulFlag & TRPOPTVXR_GRADADAPT )) {
-+      if ( getenv("TRIP_FDCB_MOJO_MATRIX") == NULL ) {
++      if ( !FDCBMojoUsesDeviceMatrix() ) {
        if ((pnFDC  = calloc( nOptFlds, sizeof(*pnFDC)  ) )==NULL) {
           sCE.iRC = ERRTRPOPT_BADADDR;
           goto gError;

@@ -2,7 +2,6 @@
 
 from std.algorithm import parallelize
 from std.memory import OpaquePointer, UnsafePointer
-from std.sys import get_defined_int
 from std.sys.info import size_of
 
 from reference_math import reference_exp
@@ -15,7 +14,7 @@ comptime CLINICAL_DOSE_ALGORITHM_MS = UInt32(1)
 comptime CLINICAL_DOSE_ALGORITHM_MSDB = UInt32(2)
 comptime CLINICAL_DOSE_BIOLOGY_NONE = UInt32(0)
 comptime CLINICAL_DOSE_BIOLOGY_LOW_DOSE = UInt32(1)
-comptime CLINICAL_DOSE_THREADS = get_defined_int["FDCB_CPU_THREADS", 12]()
+comptime CLINICAL_DOSE_THREADS = 12
 comptime CLINICAL_DOSE_PI = 3.14159265358979323846
 comptime CLINICAL_DOSE_8LN2 = 0.6932 * 8.0
 

@@ -22,7 +22,7 @@ packing so the nested and packed forms are not both fully resident.
 The reference exec is:
 
 ```text
-/lustre/bio/mdick/CUDA/TRIP_DATA/P101_4Dopt/exec/P101_ITV_full4DITVplan.lustre.exec
+${ROOT}/TRIP_DATA/P101_4Dopt/exec/P101_ITV_full4DITVplan.lustre.exec
 ```
 
 It uses ten CT states, nine robust scenarios, biological low-dose FDCB/MSDB and
@@ -53,30 +53,26 @@ The numerical optimizer contract is 12 threads. This H200 runner reserves 32
 threads for TRiP setup and uses 16 for metadata packing. A 12-thread setup probe
 took 30.461 s; shared-node variation remains visible.
 
-## Two-device memory scaling
+## Multi-device memory scaling
 
-`run_h200_4d_2gpu.sh` partitions contiguous whole voxels near half the sparse
-coefficient count. Particles and small field metadata are replicated; slices,
-scenario state and Float64 coefficients are local to one device. Both forward
-passes and both backprojections are queued before their partial gradients and
-scalar reductions are merged on the host.
+`submit.sh --vendor nvidia --gpus N --plan ...` partitions contiguous whole
+voxels near equal sparse-coefficient work. Particles and small field metadata
+are replicated; slices, scenario state and Float64 coefficients are local to
+one device. Forward passes and backprojections are queued on every device
+before their partial gradients and scalar reductions are merged on the host.
 
-H200 job 22598 used the canonical CPU-built matrix and measured 32,605 MiB of
-reserved VRAM per GPU, 13.604 s optimization, 38.80 s `OptCmd` and 49.311 s
-process wall time. It stopped at iteration 120 with the canonical objective and
-wrote both RSTs byte-identically. This path trades speed and host memory for
-lower per-device VRAM; the direct one-H200 path above remains the performance
-reference. Peak host RSS was 139,720,980 KiB because TRiP's source matrices and
-the packed host coefficient arrays overlap; removing that overlap is separate
-from device sharding.
+Direct multi-device construction gives every device its own matrix shard and
+does not create a complete host coefficient matrix. The canonical nine-scenario
+case remains byte-identical on one, two and three H200s. Current Slurm walltimes
+are 30 s, 28 s and 28 s respectively; optimizer time is 7.161 s on one H200,
+4.570 s on two and 3.690 s on three.
 
 ## Integration
 
-Hydra keeps one `trip_temp` checkout at commit `1fb423f`, patched once with the
-optimizer and clinical-dose patches under `integration/trip_temp`.
-`build_h200.sh` updates the two persistent binaries. `run_h200_4d.sh` only
-prepares the exec, runs the case and compares both RSTs; it performs no source
-copying or build.
+The cluster keeps one `trip_temp` checkout at commit `1fb423f`, patched once
+with the integration patches under `integration/trip_temp`. `build_h200.sh`
+updates the persistent Mojo library and linked TRiP executable. `submit.sh`
+runs an existing plan without copying sources or rebuilding.
 
 ## 4D clinical dose
 
@@ -87,13 +83,12 @@ its CT and RST, reduces the six raw Float64 dose terms in state order, and
 returns one reference-grid result for normal TRiP storage.
 
 The canonical optimizer exec stops after writing RSTs and the case data has no
-deformation field. `run_h200_4d_dose.sh` therefore creates a separate transient
-dose exec, expands the optimized static delivery into equal-weight state RSTs
-with TRiP's `perfectrescan`, and generates a Tumor center-of-mass translation.
-This is useful for exact `trip_temp` versus Mojo implementation comparison
-under the same motion model, but is not evidence of deformable clinical-dose
-parity. Smoothed 4D, per-state output, arc, oxygen and lung modulation are
-rejected explicitly.
+deformation field. A 4D dose validation plan must explicitly expand the static
+delivery into state RSTs with TRiP's `perfectrescan` and load a transform. This
+is useful for exact `trip_temp` versus Mojo implementation comparison under the
+same motion model, but is not evidence of deformable clinical-dose parity.
+Smoothed 4D, per-state output, arc, oxygen and lung modulation are rejected
+explicitly.
 
 H200 job 22069 confirmed that the accelerator adapter received ten states,
 41,446 reference-grid voxels and 20 flattened state fields. The physical and

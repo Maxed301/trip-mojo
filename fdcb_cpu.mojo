@@ -2,7 +2,6 @@
 
 from std.algorithm import parallelize
 from std.math import sqrt
-from std.sys import get_defined_int
 
 from fdcb_problem import (
     FDCBPackedEvaluation,
@@ -16,7 +15,7 @@ from fdcb_problem import (
 )
 
 
-comptime FDCB_CPU_THREADS = get_defined_int["FDCB_CPU_THREADS", 12]()
+comptime FDCB_CPU_THREADS = 12
 
 
 def packed_zero_gradient_direction(

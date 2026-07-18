@@ -1,8 +1,8 @@
 """Full host iteration controller shared by packed FDCB backends."""
 
 from std.math import sqrt
-from std.memory import ArcPointer
-from std.sys import get_defined_bool
+from std.memory import ArcPointer, OpaquePointer
+from std.time import perf_counter_ns
 
 from fdcb_accelerator import (
     FDCBAccelerator,
@@ -25,7 +25,6 @@ from fdcb_problem import (
     FDCB_FLAG_BIOLOGICAL,
     FDCB_FLAG_DEVICE_BOOTSTRAP,
     FDCB_FLAG_INITIALIZE,
-    FDCB_FLAG_TRACE,
     evaluate_validated_packed_physical_fdcb,
 )
 from reference_math import reference_exp
@@ -36,7 +35,6 @@ comptime FDCB_STOP_CHI2_NOT_DECREASING = UInt32(2)
 comptime FDCB_STOP_CHI_SQUARE_LIMIT = UInt32(3)
 comptime FDCB_STOP_EPSILON = UInt32(4)
 comptime FDCB_STOP_VECTOR_CHANGE = UInt32(5)
-comptime FDCB_TRACE_BUILD = get_defined_bool["FDCB_TRACE", False]()
 
 
 @fieldwise_init
@@ -235,6 +233,61 @@ struct FDCBMultiDeviceEvaluator(FDCBEvaluator, Movable):
                         shards[device].voxel_offset,
                         shards[device].voxel_count,
                         False,
+                        True,
+                    )
+                )
+            )
+        for device in range(device_count):
+            accelerators[device][].synchronize()
+        self.accelerators = accelerators^
+
+    def __init__[
+        origin: Origin
+    ](
+        out self,
+        problem: FDCBProblemV1,
+        matrix_storages: List[OpaquePointer[origin]],
+        coefficient_counts: List[Int],
+        voxel_offsets: List[Int],
+        voxel_counts: List[Int],
+    ) raises:
+        var device_count = len(matrix_storages)
+        if (
+            device_count < 2
+            or device_count > 3
+            or len(coefficient_counts) != device_count
+            or len(voxel_offsets) != device_count
+            or len(voxel_counts) != device_count
+        ):
+            raise Error("invalid external multi-device FDCB matrix shards")
+        var maximum_count = 0
+        var expected_voxel = 0
+        for device in range(device_count):
+            if (
+                coefficient_counts[device] < 1
+                or voxel_offsets[device] != expected_voxel
+                or voxel_counts[device] < 1
+            ):
+                raise Error("external FDCB matrix shards are not contiguous")
+            expected_voxel += voxel_counts[device]
+            if coefficient_counts[device] > maximum_count:
+                maximum_count = coefficient_counts[device]
+        if expected_voxel != len(problem.voxels):
+            raise Error("external FDCB matrix shards do not cover all voxels")
+        problem.validate(external_coefficient_count=UInt64(maximum_count))
+        var accelerators = List[ArcPointer[FDCBAccelerator]]()
+        accelerators.reserve(device_count)
+        for device in range(device_count):
+            accelerators.append(
+                ArcPointer(
+                    FDCBAccelerator(
+                        problem,
+                        matrix_storages[device],
+                        coefficient_counts[device],
+                        device,
+                        voxel_offsets[device],
+                        voxel_counts[device],
+                        False,
                     )
                 )
             )
@@ -329,8 +382,51 @@ def optimize_packed_fdcb_two_accelerators(
 def optimize_packed_fdcb_accelerators(
     problem: FDCBProblemV1, device_count: Int
 ) raises -> FDCBOptimizationResult:
+    var start_ns = perf_counter_ns()
     var evaluator = FDCBMultiDeviceEvaluator(problem, device_count)
-    return optimize_packed_fdcb_with_evaluator(problem, evaluator)
+    var setup_ns = perf_counter_ns()
+    var result = optimize_packed_fdcb_with_evaluator(problem, evaluator)
+    var done_ns = perf_counter_ns()
+    print(
+        "<TIME> FDCB Mojo multi setup: ",
+        Float64(setup_ns - start_ns) * 1.0e-9,
+        " sec iterations: ",
+        Float64(done_ns - setup_ns) * 1.0e-9,
+        " sec",
+        sep="",
+    )
+    return result^
+
+
+def optimize_packed_fdcb_accelerator_matrices[
+    origin: Origin
+](
+    problem: FDCBProblemV1,
+    matrix_storages: List[OpaquePointer[origin]],
+    coefficient_counts: List[Int],
+    voxel_offsets: List[Int],
+    voxel_counts: List[Int],
+) raises -> FDCBOptimizationResult:
+    var start_ns = perf_counter_ns()
+    var evaluator = FDCBMultiDeviceEvaluator(
+        problem,
+        matrix_storages,
+        coefficient_counts,
+        voxel_offsets,
+        voxel_counts,
+    )
+    var setup_ns = perf_counter_ns()
+    var result = optimize_packed_fdcb_with_evaluator(problem, evaluator)
+    var done_ns = perf_counter_ns()
+    print(
+        "<TIME> FDCB Mojo multi-direct setup: ",
+        Float64(setup_ns - start_ns) * 1.0e-9,
+        " sec iterations: ",
+        Float64(done_ns - setup_ns) * 1.0e-9,
+        " sec",
+        sep="",
+    )
+    return result^
 
 
 def optimize_packed_fdcb_accelerator_matrix[
@@ -369,19 +465,6 @@ def optimize_packed_fdcb_with_evaluator[
     var last_factor = 0.0
     var last_exact_step = 0.0
     var stop_reason = FDCB_STOP_MAX_ITERATIONS
-    var trace = (problem.settings.flags & FDCB_FLAG_TRACE) != UInt32(0)
-    comptime if FDCB_TRACE_BUILD:
-        trace = True
-    if trace:
-        print(
-            "<TRACE> FDCB initial chi2",
-            evaluation.chi2,
-            "weighted",
-            evaluation.weighted_dose2,
-            "gradient",
-            evaluation.gradient_norm,
-        )
-
     var initialize = (problem.settings.flags & FDCB_FLAG_INITIALIZE) != UInt32(
         0
     )
@@ -471,33 +554,6 @@ def optimize_packed_fdcb_with_evaluator[
         else:
             relative_change = 0.0
         last_factor = factor
-        if trace:
-            print(
-                "<TRACE> FDCB update",
-                update_index,
-                "iteration",
-                iteration,
-                "init",
-                initialization_update,
-                "before",
-                evaluation.chi2,
-                "after",
-                candidate_evaluation.chi2,
-                "relative",
-                relative_change,
-                "exact",
-                exact_step,
-                "factor",
-                factor,
-                "gradient",
-                candidate_evaluation.gradient_norm,
-                "vector",
-                vector_change,
-                "deleted",
-                deleted,
-                "rng",
-                random_draws,
-            )
         if (
             not initialization_update
             and iteration >= Int(problem.settings.grace_iterations)

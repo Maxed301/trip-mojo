@@ -6,7 +6,7 @@ WET/setup, dose storage and output.
 
 The sole correctness and performance reference is the clean
 `~/Projects/trip_temp` checkout at commit `1fb423f`. See `AGENTS.md` for the
-canonical local and Hydra paths.
+canonical local and cluster paths.
 
 ## Status
 
@@ -14,28 +14,19 @@ canonical local and Hydra paths.
 |---|---|
 | CPU FDCB | P101 3D robust biological plan stops at iteration 271 and writes byte-identical RSTs. |
 | NVIDIA FDCB | P101 ten-state, nine-scenario 4D robust plan stops at iteration 120 and writes byte-identical RSTs on H200. |
-| NVIDIA multi-GPU | The same 4D plan is coefficient-balanced across two H200s and remains byte-identical. |
+| NVIDIA multi-GPU | The same 4D plan uses direct coefficient-balanced matrix shards across two or three H200s and remains byte-identical. |
 | CPU dose | Full static P101 physical/biological cubes match within one/two Float32 output ULPs. |
 | NVIDIA dose | Same complete static case and support validated on H200. |
 | 4D dose | P101 ten-state perfect-rescan physical/biological cubes are byte-identical to `trip_temp` on H200. |
-| ARC | CAK257 stops at iteration 70 and writes 180 byte-identical RSTs on H200; physical and biological dose now agree at Float64 roundoff. |
+| ARC | The head-and-neck ARC case stops at iteration 70 and writes 180 byte-identical RSTs on H200; physical and biological dose now agree at Float64 roundoff. |
 | AMD | P101 3D stops at iteration 271 with byte-identical RSTs and DVH on MI100; dose agrees at Float32 output-rounding level. |
 | Apple | Kernel lowering has been probed. Runtime validation remains experimental and lowest priority. |
 
-Canonical measurements use 12 optimizer threads. The latest H200 4D run used
-32 setup threads and 16 metadata-packing threads, completed in 27.841 s process
-wall time versus 476.751 s for `trip_temp`, and produced two byte-identical
-RSTs. Its full Mojo optimization call took 6.764 s. Full details are in
+Canonical measurements use 12 optimizer threads. The validated H200 runner
+reserves 32 threads for TRiP setup and uses 16 for metadata packing. Direct
+matrix construction now shards whole voxels across one, two or three devices
+without staging the coefficient matrix in host memory. Full details are in
 [`docs/4d-robust.md`](docs/4d-robust.md).
-
-The memory-scaled two-H200 path keeps each voxel's scenarios together and
-stores only that shard's slices and coefficients on each GPU. Job 22598 used
-32,605 MiB of reserved VRAM per H200, completed optimization in 13.604 s and
-wrote the same byte-identical RSTs. Its 49.311 s process wall time includes
-TRiP's CPU matrix construction and the packed host copy; the direct
-single-device matrix path remains faster when one GPU has enough memory.
-Peak host RSS was 139,720,980 KiB, so this solves per-GPU capacity but not yet
-low-host-memory execution.
 
 For the static dose case, CPU `DoseCmd` fell from 109.20 s to 63.29 s. H200
 `DoseCmd` measured 15.52--19.31 s versus 236.39 s for the server CPU reference.
@@ -49,18 +40,19 @@ identical.
 uv sync --frozen
 MOJO=.venv/bin/mojo
 mkdir -p build
-$MOJO build -I . -O3 -g1 -D FDCB_CPU_THREADS=12 --emit shared-lib \
+$MOJO build -I . -O3 -g1 --emit shared-lib \
   fdcb_abi.mojo -Xlinker -lm -o build/libtrip_fdcb_mojo.so
 
+# CPU tests run without an accelerator:
 for test in test_fdcb_problem test_fdcb_cpu test_fdcb_optimize \
-  test_fdcb_min_particles test_fdcb_accelerator; do
-  $MOJO run -I . -O3 -D FDCB_CPU_THREADS=12 tests/$test.mojo
+  test_fdcb_min_particles; do
+  $MOJO run -I . -O3 tests/$test.mojo
 done
-# Requires two visible accelerators:
+# Requires one visible accelerator:
+$MOJO run -I . -O3 tests/test_fdcb_accelerator.mojo
+# Require two and three visible accelerators, respectively:
 $MOJO run -I . -O3 tests/test_fdcb_two_accelerators.mojo
-$MOJO run -I . -O3 -D FDCB_CPU_THREADS=12 -D FDCB_MIXED32=true \
-  tests/test_fdcb_accelerator_mixed32.mojo
-$MOJO run -I . -O3 tests/test_exec_parser.mojo
+$MOJO run -I . -O3 tests/test_fdcb_three_accelerators.mojo
 
 cc -O2 -Iinclude tests/ffi/test_fdcb_abi.c -Lbuild -ltrip_fdcb_mojo \
   -Wl,-rpath,'$ORIGIN' -o build/test_fdcb_abi
@@ -69,26 +61,38 @@ cc -O2 -Iinclude tests/ffi/test_clinical_dose_abi.c -Lbuild \
 build/test_fdcb_abi && build/test_clinical_dose_abi
 ```
 
-Hydra uses one persistently patched `trip_temp` build. Apply both
-`integration/trip_temp/trip_temp_mojo.patch` and
-`integration/trip_temp/trip_temp_clinical_dose.patch` once with Git's
-`--ignore-space-change --ignore-whitespace` options because the canonical tree
-contains CRLF files. Use `build_h200.sh` after source changes and submit
-`run_h200_4d.sh` for run-only validation. The runner does not copy or rebuild
-either repository.
+On the cluster, a prebuilt Mojo-linked TRiP plan is submitted with no backend feature
+flags:
 
-`run_h200_4d_2gpu.sh` requests two H200s and selects the sharded optimizer with
-`TRIP_FDCB_MOJO_DEVICES=2`. Multi-device V1 uses the canonical CPU-built
-Float64 matrix; direct accelerator matrix storage is intentionally
-single-device.
+```bash
+./submit.sh --vendor amd --gpus 2 --plan plan.exec
+```
+
+`--gpus` defaults to one. `submit.sh` is the only job entry point; plans select
+the TRiP workload and Slurm's visible devices select the accelerator count.
+The requested devices are discovered from Slurm's standard visibility. The
+Mojo-linked executable always uses the Mojo FDCB optimizer and clinical-dose
+backend. NVIDIA uses direct accelerator matrix storage, including per-device
+matrix ownership for multi-GPU jobs. AMD retains TRiP's canonical CPU-built
+Float64 matrix. Native comparisons require a separate unpatched `trip_temp`
+executable.
+
+The cluster uses one persistently patched `trip_temp` build. Apply
+`integration/trip_temp/trip_temp_mojo.patch` and
+`integration/trip_temp/trip_temp_clinical_dose.patch`, followed by
+`integration/trip_temp/trip_temp_robust_scenarios.patch`, once with Git's
+`--ignore-space-change --ignore-whitespace` options because the canonical tree
+contains CRLF files. Use `build_h200.sh` after source changes, then submit every
+plan through `submit.sh`. Submission never copies or rebuilds either repository.
 
 ARC validation uses a linked `trip_temp` `Arc-dev` worktree at commit
 `347494d4`. Apply the common optimizer patch excluding `CMakeLists.txt` and
 `trpopt.c`, then apply `trip_arc_dev_mojo.patch`,
 `trip_arc_field_setup.patch` and the clinical-dose patch.
-`build_h200_arc.sh` builds it and `run_h200_arc.sh` runs the original CAK257
-exec from separate output directories, so its `/lustre/bio` inputs are not
-copied or modified. The runner stages generated files on node-local storage.
+`build_h200_arc.sh` builds it. ARC plans and patient paths are supplied by the
+operator and submitted through `submit.sh`; the Mojo-linked executable has no
+runtime native fallback. A native comparison requires a separately built,
+unpatched Arc-dev executable.
 To avoid one Lustre metadata operation per arc field, each result directory
 stores the 180 RSTs losslessly in `rst.tar`; dose and DVH files remain directly
 accessible. The reported wall time includes this publication step. H200 job 22380 completed
@@ -148,9 +152,8 @@ stop, wrote byte-identical RSTs and DVH, and measured 35.097 s for optimization,
 17.47 s for `DoseCmd`, and 111.845 s process wall time. Full dose metrics are in
 [`docs/mi100.md`](docs/mi100.md).
 
-Reference mode is Float64 throughout, matching the configured `trip_temp`
-matrix and optimizer. `FDCB_MIXED32=true` is an explicit experimental build;
-it cannot silently narrow a reference problem.
+The implementation is Float64 throughout, matching the configured `trip_temp`
+matrix and optimizer. Production builds cannot select a narrower precision.
 
 ## Clinical-dose boundary
 

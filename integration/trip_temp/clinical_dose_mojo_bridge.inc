@@ -322,12 +322,9 @@ static int TRPClinicalDoseMojoRun(
    p.bio_tables=b.bio_tables; p.bio_entries=b.bio_entries;
    p.transformed_voxel_count=four_d?voxels*(uint64_t)states:0;
    p.states=four_d?b.states:NULL; p.transformed_voxels=b.positions;
-   fprintf(stderr,"<I> Mojo clinical dose: backend=%s states=%d voxels=%llu fields=%u\n",
-           getenv("TRIP_CLINICAL_DOSE_MOJO_ACCELERATOR")?"accelerator":"cpu",
+   fprintf(stderr,"<I> Mojo clinical dose: backend=accelerator states=%d voxels=%llu fields=%u\n",
            states,(unsigned long long)voxels,fields);
-   rc=getenv("TRIP_CLINICAL_DOSE_MOJO_ACCELERATOR") ?
-      trip_clinical_dose_compute_accelerator_v1(&p,b.output,voxels) :
-      trip_clinical_dose_compute_v1(&p,b.output,voxels);
+   rc=trip_clinical_dose_compute_accelerator_v1(&p,b.output,voxels);
    if ( rc ) { fprintf(stderr,"<E> Mojo clinical dose ABI failed: %d\n",rc);
       rc=CMDERR_ERROR|ERRTRPDOSE_BADFIELD; goto done; }
    double norm[TRPDOSE_MAX]; TRPDoseSetNorm(dc,norm);

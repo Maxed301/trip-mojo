@@ -1,6 +1,5 @@
 from std.math import sqrt
 
-from opt_voxels import OptVoxelSet
 from sparse_optimizer import SparseDoseMatrix
 
 
@@ -403,32 +402,6 @@ def fdcb_fletcher_reeves_direction(
     for i in range(len(gradient)):
         direction.append(gradient[i] + previous_direction[i] * gamma)
     return direction^
-
-
-def p101_fdcb_objectives_from_opt_voxels(
-    opt_voxels: OptVoxelSet,
-    prescription_dose_gy: Float64,
-    target_weight: Float64,
-    avoidance_weight: Float64,
-    avoidance_max_dose_fraction: Float64,
-    no_dose_weight: Bool,
-    overdose_tolerance: Float64 = 0.05,
-) -> List[FDCBVoxelObjective]:
-    var objectives = List[FDCBVoxelObjective]()
-    objectives.reserve(len(opt_voxels.voxels))
-    for i in range(len(opt_voxels.voxels)):
-        var dose_p = prescription_dose_gy
-        var dose_w = target_weight
-        if opt_voxels.voxels[i].role != 1:
-            dose_p = -prescription_dose_gy * avoidance_max_dose_fraction
-            dose_w = avoidance_weight
-        var dose_d = 1.0
-        if not no_dose_weight:
-            dose_d = abs_float(dose_p)
-            if dose_d == 0.0:
-                dose_d = 1.0
-        objectives.append(FDCBVoxelObjective(dose_p, dose_w, dose_d, 0.0, overdose_tolerance))
-    return objectives^
 
 
 def validate_fdcb_inputs(

@@ -162,7 +162,9 @@ int main(void) {
     assert(fabs(accelerator_output.let_bar - output.let_bar) < 1.0e-12);
     assert(fabs(accelerator_output.let_dm_sum - output.let_dm_sum) < 1.0e-12);
 #else
-    assert(trip_clinical_dose_compute_accelerator_v1(&problem, &output, 1) == -3);
+    const int32_t accelerator_status =
+        trip_clinical_dose_compute_accelerator_v1(&problem, &output, 1);
+    assert(accelerator_status == 0 || accelerator_status == -3);
 #endif
     energy.range_shifter = 0.25f;
     points[0].delta_z = points[1].delta_z = 0.25f;

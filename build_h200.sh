@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${ROOT:-/lustre/bio/mdick/CUDA}"
+ROOT="${ROOT:?set ROOT to your cluster scratch directory (e.g. /scratch/$USER/trip)}"
 REPO="${REPO:-${ROOT}/trip-mojo}"
 TRIP="${TRIP:-${ROOT}/trip_temp}"
 CONTAINER="${CONTAINER:-${ROOT}/trip-dev.sif}"
 UV="${UV:-${ROOT}/bin/uv}"
 THREADS="${THREADS:-12}"
-PACK_THREADS="${PACK_THREADS:-16}"
 MOJO_BUILD="${REPO}/build/h200"
 TRIP_BUILD="${TRIP}/build-mojo-h200"
 PATCH="${REPO}/integration/trip_temp/trip_temp_mojo.patch"
 DOSE_PATCH="${REPO}/integration/trip_temp/trip_temp_clinical_dose.patch"
+ROBUST_PATCH="${REPO}/integration/trip_temp/trip_temp_robust_scenarios.patch"
 
 test "$(git -C "${TRIP}" rev-parse HEAD)" = \
   "1fb423f62b76a18b13b4ffd43e8dde55d004e9b5"
@@ -19,10 +19,12 @@ git -C "${TRIP}" apply --reverse --check --ignore-space-change \
   --ignore-whitespace --whitespace=nowarn "${PATCH}"
 git -C "${TRIP}" apply --reverse --check --ignore-space-change \
   --ignore-whitespace --whitespace=nowarn "${DOSE_PATCH}"
+git -C "${TRIP}" apply --reverse --check --ignore-space-change \
+  --ignore-whitespace --whitespace=nowarn "${ROBUST_PATCH}"
 mkdir -p "${MOJO_BUILD}" "${ROOT}/.tmp" "${ROOT}/.uv-python" \
   "${ROOT}/.ccache-trip-mojo"
 
-apptainer exec -B /lustre:/lustre "${CONTAINER}" env \
+apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
   UV_CACHE_DIR="${ROOT}/.uv-cache" \
   UV_PYTHON_INSTALL_DIR="${ROOT}/.uv-python" TMPDIR="${ROOT}/.tmp" \
   CCACHE_DIR="${ROOT}/.ccache-trip-mojo" \
@@ -31,9 +33,6 @@ apptainer exec -B /lustre:/lustre "${CONTAINER}" env \
     cd '${REPO}'
     '${UV}' sync --frozen
     .venv/bin/mojo build -I . -O3 -g1 \
-      -D FDCB_CPU_THREADS='${THREADS}' \
-      -D FDCB_PACK_THREADS='${PACK_THREADS}' \
-      -D FDCB_ABI_ACCELERATOR=true \
       --target-accelerator sm_90a --emit shared-lib fdcb_abi.mojo \
       -Xlinker -lm -o '${MOJO_BUILD}/libtrip_fdcb_mojo.so'
     cmake -S '${TRIP}' -B '${TRIP_BUILD}' \

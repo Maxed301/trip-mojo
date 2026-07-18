@@ -1,9 +1,8 @@
-Bootstrap: localimage
-From: /lustre/bio/mdick/CUDA/cuda_13.0.1-cudnn-devel-ubuntu22.04.sif
+Bootstrap: docker
+From: nvidia/cuda:13.0.1-cudnn-devel-ubuntu22.04
 
 %labels
-    Author max/openai
-    Description TRIP CUDA and ROCm development image for Hydra GPU builds
+    Description TRiP CUDA and ROCm development image for GPU builds
 
 %post
     export DEBIAN_FRONTEND=noninteractive
@@ -57,7 +56,7 @@ From: /lustre/bio/mdick/CUDA/cuda_13.0.1-cudnn-devel-ubuntu22.04.sif
     exec "$@"
 
 %help
-    TRIP CUDA and ROCm development container for Hydra.
+    TRiP CUDA and ROCm development container.
 
     NVIDIA:
       apptainer exec --nv trip-dev.sif bash

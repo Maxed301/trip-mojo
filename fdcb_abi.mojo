@@ -2,7 +2,7 @@
 
 from std.algorithm import parallelize
 from std.memory import OpaquePointer, UnsafePointer, alloc
-from std.sys import get_defined_bool, get_defined_int
+from std.sys import has_accelerator
 
 from clinical_dose import (
     ClinicalDoseOutputV1,
@@ -22,6 +22,7 @@ from fdcb_optimize import (
     optimize_packed_fdcb,
     optimize_packed_fdcb_accelerator,
     optimize_packed_fdcb_accelerators,
+    optimize_packed_fdcb_accelerator_matrices,
     optimize_packed_fdcb_accelerator_matrix,
 )
 from fdcb_problem import (
@@ -36,10 +37,8 @@ from fdcb_problem import (
 )
 
 
-comptime FDCB_ABI_ACCELERATOR = get_defined_bool[
-    "FDCB_ABI_ACCELERATOR", False
-]()
-comptime FDCB_ABI_COPY_THREADS = get_defined_int["FDCB_CPU_THREADS", 12]()
+comptime HAS_ACCELERATOR_ABI = has_accelerator()
+comptime FDCB_ABI_COPY_THREADS = 12
 comptime FDCB_OPTIMIZER_FDCB = UInt32(1)
 comptime FDCB_DOSE_MS = UInt32(1)
 comptime FDCB_DOSE_MSDB = UInt32(2)
@@ -57,7 +56,7 @@ def trip_fdcb_matrix_build_accelerator_v1(
     ],
     result_out: UnsafePointer[FDCBMatrixResultV1, MutExternalOrigin],
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         return fdcb_matrix_build_accelerator_abi_v1(
             problem_pointer, storage_out, result_out
         )
@@ -69,7 +68,7 @@ def trip_fdcb_matrix_build_accelerator_v1(
 def trip_fdcb_matrix_storage_destroy_v1(
     storage_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         return fdcb_matrix_storage_destroy_abi_v1(storage_pointer)
     else:
         return Int32(-3)
@@ -90,7 +89,7 @@ def trip_clinical_dose_compute_accelerator_v1(
     output: UnsafePointer[ClinicalDoseOutputV1, MutExternalOrigin],
     output_count: UInt64,
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         return clinical_dose_compute_accelerator_abi_v1(
             problem_pointer, output, output_count
         )
@@ -238,6 +237,15 @@ struct ABIMatrixProblemStorage(Movable):
 
 
 @fieldwise_init
+struct ABIMultiMatrixProblemStorage(Movable):
+    var problem: FDCBProblemV1
+    var matrix_storages: List[OpaquePointer[MutExternalOrigin]]
+    var coefficient_counts: List[Int]
+    var voxel_offsets: List[Int]
+    var voxel_counts: List[Int]
+
+
+@fieldwise_init
 struct ABIResult(Copyable, Movable):
     var chi2: Float64
     var residual_percent: Float64
@@ -331,6 +339,72 @@ def trip_fdcb_matrix_problem_storage_create_v1(
         return Int32(-1)
 
 
+@export("trip_fdcb_matrix_problem_storage_create_accelerators_v1", ABI="C")
+def trip_fdcb_matrix_problem_storage_create_accelerators_v1(
+    template_pointer: OpaquePointer[MutExternalOrigin],
+    matrix_pointers: UnsafePointer[
+        OpaquePointer[MutExternalOrigin], MutExternalOrigin
+    ],
+    matrix_entry_counts: UnsafePointer[UInt64, MutExternalOrigin],
+    voxel_offsets_pointer: UnsafePointer[UInt64, MutExternalOrigin],
+    voxel_counts_pointer: UnsafePointer[UInt64, MutExternalOrigin],
+    device_count: UInt32,
+    storage_out: UnsafePointer[
+        OpaquePointer[MutExternalOrigin], MutExternalOrigin
+    ],
+    arrays_out: UnsafePointer[ABIWritableArrays, MutExternalOrigin],
+) -> Int32:
+    try:
+        if device_count < UInt32(2) or device_count > UInt32(3):
+            return Int32(-2)
+        var view = template_pointer.bitcast[ABIProblemView]()[].copy()
+        validate_abi_contract(view)
+        var matrices = List[OpaquePointer[MutExternalOrigin]]()
+        var counts = List[Int]()
+        var voxel_offsets = List[Int]()
+        var voxel_counts = List[Int]()
+        var total_entries = UInt64(0)
+        var expected_voxel = UInt64(0)
+        for device in range(Int(device_count)):
+            var matrix_pointer = matrix_pointers[device]
+            var matrix = matrix_pointer.bitcast[FDCBMatrixStorageV1]()
+            var count = matrix_entry_counts[device]
+            if (
+                count == UInt64(0)
+                or UInt64(matrix[].entry_count) != count
+                or voxel_offsets_pointer[device] != expected_voxel
+                or voxel_counts_pointer[device] == UInt64(0)
+            ):
+                raise Error("invalid external FDCB matrix shard")
+            matrices.append(matrix_pointer)
+            counts.append(Int(count))
+            voxel_offsets.append(Int(expected_voxel))
+            voxel_counts.append(Int(voxel_counts_pointer[device]))
+            total_entries += count
+            expected_voxel += voxel_counts_pointer[device]
+        if total_entries != view.coefficient_count:
+            raise Error("matrix and optimizer coefficient counts differ")
+        if expected_voxel != view.voxel_count:
+            raise Error("matrix shards do not cover optimizer voxels")
+        var problem = allocate_problem(view, allocate_coefficients=False)
+        var storage = alloc[ABIMultiMatrixProblemStorage](1)
+        storage.init_pointee_move(
+            ABIMultiMatrixProblemStorage(
+                problem^,
+                matrices^,
+                counts^,
+                voxel_offsets^,
+                voxel_counts^,
+            )
+        )
+        arrays_out[] = writable_arrays(storage[].problem)
+        storage_out[] = storage.bitcast[NoneType]()
+        return Int32(0)
+    except error:
+        print("FDCB multi-matrix problem storage create ABI error:", error)
+        return Int32(-1)
+
+
 @export("trip_fdcb_storage_destroy_v1", ABI="C")
 def trip_fdcb_storage_destroy_v1(
     storage_pointer: OpaquePointer[MutExternalOrigin],
@@ -347,6 +421,18 @@ def trip_fdcb_matrix_problem_storage_destroy_v1(
 ) -> Int32:
     var storage = storage_pointer.bitcast[ABIMatrixProblemStorage]()
     _ = fdcb_matrix_storage_destroy_abi_v1(storage[].matrix_storage)
+    storage.destroy_pointee()
+    storage.free()
+    return Int32(0)
+
+
+@export("trip_fdcb_matrix_problem_storage_destroy_accelerators_v1", ABI="C")
+def trip_fdcb_matrix_problem_storage_destroy_accelerators_v1(
+    storage_pointer: OpaquePointer[MutExternalOrigin],
+) -> Int32:
+    var storage = storage_pointer.bitcast[ABIMultiMatrixProblemStorage]()
+    for matrix in storage[].matrix_storages:
+        _ = fdcb_matrix_storage_destroy_abi_v1(matrix)
     storage.destroy_pointee()
     storage.free()
     return Int32(0)
@@ -374,7 +460,7 @@ def trip_fdcb_storage_optimize_accelerator_v1(
     particles_out_count: UInt64,
     result_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         return optimize_storage_v1[True](
             storage_pointer,
             particles_out,
@@ -393,7 +479,7 @@ def trip_fdcb_storage_optimize_accelerators_v1(
     device_count: UInt32,
     result_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         try:
             if device_count < UInt32(2) or device_count > UInt32(3):
                 return Int32(-2)
@@ -420,7 +506,7 @@ def trip_fdcb_matrix_problem_optimize_accelerator_v1(
     particles_out_count: UInt64,
     result_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         try:
             var storage = storage_pointer.bitcast[ABIMatrixProblemStorage]()
             if particles_out_count != UInt64(len(storage[].problem.particles)):
@@ -435,6 +521,35 @@ def trip_fdcb_matrix_problem_optimize_accelerator_v1(
             )
         except error:
             print("FDCB matrix problem optimize ABI error:", error)
+            return Int32(-1)
+    else:
+        return Int32(-3)
+
+
+@export("trip_fdcb_matrix_problem_optimize_accelerators_v1", ABI="C")
+def trip_fdcb_matrix_problem_optimize_accelerators_v1(
+    storage_pointer: OpaquePointer[MutExternalOrigin],
+    particles_out: UnsafePointer[Float64, MutExternalOrigin],
+    particles_out_count: UInt64,
+    result_pointer: OpaquePointer[MutExternalOrigin],
+) -> Int32:
+    comptime if HAS_ACCELERATOR_ABI:
+        try:
+            var storage = storage_pointer.bitcast[ABIMultiMatrixProblemStorage]()
+            if particles_out_count != UInt64(len(storage[].problem.particles)):
+                return Int32(-2)
+            var result = optimize_packed_fdcb_accelerator_matrices(
+                storage[].problem,
+                storage[].matrix_storages,
+                storage[].coefficient_counts,
+                storage[].voxel_offsets,
+                storage[].voxel_counts,
+            )
+            return write_optimization_result(
+                result, particles_out, result_pointer
+            )
+        except error:
+            print("FDCB multi-matrix optimize ABI error:", error)
             return Int32(-1)
     else:
         return Int32(-3)
@@ -517,7 +632,7 @@ def trip_fdcb_optimize_accelerator_v1(
     particles_out_count: UInt64,
     result_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    comptime if FDCB_ABI_ACCELERATOR:
+    comptime if HAS_ACCELERATOR_ABI:
         return optimize_v1[True](
             problem_pointer,
             particles_out,

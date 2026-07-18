@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${ROOT:-/lustre/bio/mdick/CUDA}"
+ROOT="${ROOT:?set ROOT to your cluster scratch directory (e.g. /scratch/$USER/trip)}"
 REPO="${REPO:-${ROOT}/trip-mojo}"
 TRIP="${TRIP:-${ROOT}/trip_arc}"
 CONTAINER="${CONTAINER:-${ROOT}/trip-dev.sif}"
 UV="${UV:-${ROOT}/bin/uv}"
 THREADS="${THREADS:-12}"
-PACK_THREADS="${PACK_THREADS:-32}"
 BUILD_MOJO="${BUILD_MOJO:-1}"
 BUILD_TRIP="${BUILD_TRIP:-1}"
 MOJO_BUILD="${REPO}/build/h200-arc"
@@ -31,7 +30,7 @@ git -C "${TRIP}" apply --reverse --check \
 mkdir -p "${MOJO_BUILD}" "${TRIP_BUILD}" "${TRIP_COMPILE_DIR}" \
   "${ROOT}/.tmp" "${ROOT}/.uv-python"
 
-apptainer exec -B /lustre:/lustre "${CONTAINER}" env \
+apptainer exec -B "${BIND:-/lustre}:${BIND:-/lustre}" "${CONTAINER}" env \
   UV_CACHE_DIR="${ROOT}/.uv-cache" \
   UV_PYTHON_INSTALL_DIR="${ROOT}/.uv-python" TMPDIR="${ROOT}/.tmp" \
   CCACHE_DISABLE=1 \
@@ -41,9 +40,6 @@ apptainer exec -B /lustre:/lustre "${CONTAINER}" env \
     if [[ '${BUILD_MOJO}' == 1 ]]; then
       '${UV}' sync --frozen
       .venv/bin/mojo build -I . -O3 -g1 \
-        -D FDCB_CPU_THREADS='${THREADS}' \
-        -D FDCB_PACK_THREADS='${PACK_THREADS}' \
-        -D FDCB_ABI_ACCELERATOR=true \
         --target-accelerator sm_90a --emit shared-lib fdcb_abi.mojo \
         -Xlinker -lm -o '${MOJO_BUILD}/libtrip_fdcb_mojo.so'
     fi
