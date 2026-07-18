@@ -1,6 +1,6 @@
 from std.math import sqrt
 
-from sparse_optimizer import SparseDoseMatrix
+from tests.support.sparse_matrix import SparseDoseMatrix
 
 
 @fieldwise_init
@@ -15,32 +15,6 @@ struct VoxelObjective(Copyable, Movable):
 @fieldwise_init
 struct PhysicalScenarioSet(Copyable, Movable):
     var matrices: List[SparseDoseMatrix]
-
-
-@fieldwise_init
-struct RobustEvaluation(Copyable, Movable):
-    var dose_by_scenario: List[List[Float64]]
-    var dose_a: List[Float64]
-    var dose_min: List[Float64]
-    var dose_max: List[Float64]
-    var min_scenario: List[Int]
-    var max_scenario: List[Int]
-    var gradient: List[Float64]
-    var chi2: Float64
-    var dose_p_weighted_avg2: Float64
-    var grad_norm: Float64
-
-    def residual_percent(self) -> Float64:
-        if self.dose_p_weighted_avg2 <= 0.0:
-            return 0.0
-        return sqrt(self.chi2 / self.dose_p_weighted_avg2) * 100.0
-
-
-@fieldwise_init
-struct StepResult(Copyable, Movable):
-    var particles: List[Float64]
-    var evaluation: RobustEvaluation
-    var dmy: Float64
 
 
 @fieldwise_init
@@ -104,150 +78,6 @@ struct BioRobustEvaluation(Copyable, Movable):
     var chi2: Float64
     var dose_p_weighted_avg2: Float64
     var grad_norm: Float64
-
-
-def evaluate_robust_physical(
-    scenarios: PhysicalScenarioSet,
-    objectives: List[VoxelObjective],
-    particles: List[Float64],
-    include_dmax: Bool = False,
-) raises -> RobustEvaluation:
-    validate_physical_inputs(scenarios, objectives, particles)
-    var dose_by_scenario = List[List[Float64]]()
-    dose_by_scenario.reserve(len(scenarios.matrices))
-    for i in range(len(scenarios.matrices)):
-        dose_by_scenario.append(
-            compute_sparse_dose(scenarios.matrices[i], particles)
-        )
-
-    var dose_a = List[Float64]()
-    var dose_min = List[Float64]()
-    var dose_max = List[Float64]()
-    var min_scenario = List[Int]()
-    var max_scenario = List[Int]()
-    dose_a.resize(len(objectives), 0.0)
-    dose_min.resize(len(objectives), 0.0)
-    dose_max.resize(len(objectives), 0.0)
-    min_scenario.resize(len(objectives), 0)
-    max_scenario.resize(len(objectives), 0)
-
-    for voxel in range(len(objectives)):
-        var dmin = dose_by_scenario[0][voxel]
-        var dmax = dose_by_scenario[0][voxel]
-        var imin = 0
-        var imax = 0
-        for scenario in range(1, len(dose_by_scenario)):
-            var dose = dose_by_scenario[scenario][voxel]
-            if dose < dmin:
-                dmin = dose
-                imin = scenario
-            if dose > dmax:
-                dmax = dose
-                imax = scenario
-        dose_min[voxel] = dmin
-        dose_max[voxel] = dmax
-        min_scenario[voxel] = imin
-        max_scenario[voxel] = imax
-        if objectives[voxel].dose_p > 0.0:
-            dose_a[voxel] = dmin
-        else:
-            dose_a[voxel] = dmax
-
-    var gradient = List[Float64]()
-    gradient.resize(len(particles), 0.0)
-    var chi2 = 0.0
-    var dose_p_weighted_avg2 = 0.0
-
-    for voxel in range(len(objectives)):
-        var ddp = abs_float(objectives[voxel].dose_p)
-        if ddp <= 0.0:
-            continue
-        var weight = objectives[voxel].dose_w / objectives[voxel].dose_d
-        var ddose_chi = ddp - dose_a[voxel]
-        if ddose_chi < 0.0 or objectives[voxel].dose_p > 0.0:
-            chi2 += (ddose_chi * weight) * (ddose_chi * weight)
-        dose_p_weighted_avg2 += (weight * objectives[voxel].dose_p) * (
-            weight * objectives[voxel].dose_p
-        )
-
-        var scenario = min_scenario[voxel]
-        if objectives[voxel].dose_p < 0.0:
-            scenario = max_scenario[voxel]
-        var ddose_grad = ddp - dose_by_scenario[scenario][voxel]
-        var dose_d = objectives[voxel].dose_d
-        if objectives[voxel].dose_p < 0.0:
-            if ddose_grad > 0.0:
-                ddose_grad = 0.0
-        elif ddose_grad < 0.0:
-            if (
-                ddose_grad
-                > objectives[voxel].dose_p
-                * -objectives[voxel].overdose_tolerance
-            ):
-                ddose_grad = 0.0
-            else:
-                ddose_grad += (
-                    objectives[voxel].dose_p
-                    * objectives[voxel].overdose_tolerance
-                )
-        if ddose_grad != 0.0:
-            var factor = (ddose_grad * objectives[voxel].dose_w / dose_d) * (
-                2.0 * objectives[voxel].dose_w / dose_d
-            )
-            scatter_voxel_gradient(
-                scenarios.matrices[scenario], voxel, factor, gradient
-            )
-
-        if include_dmax and objectives[voxel].dose_p > 0.0:
-            var max_weight = (
-                objectives[voxel].dose_w_max / objectives[voxel].dose_d
-            )
-            var ddose_max_chi = ddp - dose_max[voxel]
-            chi2 += (ddose_max_chi * max_weight) * (ddose_max_chi * max_weight)
-            dose_p_weighted_avg2 += (max_weight * objectives[voxel].dose_p) * (
-                max_weight * objectives[voxel].dose_p
-            )
-            var ddose_max_grad = ddose_max_chi
-            if ddose_max_grad > 0.0:
-                ddose_max_grad = 0.0
-            elif ddose_max_grad < 0.0:
-                if (
-                    ddose_max_grad
-                    > objectives[voxel].dose_p
-                    * -objectives[voxel].overdose_tolerance
-                ):
-                    ddose_max_grad = 0.0
-                else:
-                    ddose_max_grad += (
-                        objectives[voxel].dose_p
-                        * objectives[voxel].overdose_tolerance
-                    )
-            if ddose_max_grad != 0.0:
-                var factor_max = (
-                    ddose_max_grad * objectives[voxel].dose_w_max / dose_d
-                ) * (2.0 * objectives[voxel].dose_w_max / dose_d)
-                scatter_voxel_gradient(
-                    scenarios.matrices[max_scenario[voxel]],
-                    voxel,
-                    factor_max,
-                    gradient,
-                )
-
-    var grad_norm2 = 0.0
-    for i in range(len(gradient)):
-        grad_norm2 += gradient[i] * gradient[i]
-    return RobustEvaluation(
-        dose_by_scenario^,
-        dose_a^,
-        dose_min^,
-        dose_max^,
-        min_scenario^,
-        max_scenario^,
-        gradient^,
-        chi2,
-        dose_p_weighted_avg2,
-        sqrt(grad_norm2),
-    )
 
 
 def evaluate_robust_biological(
@@ -365,108 +195,6 @@ def evaluate_robust_biological(
     )
 
 
-def compute_robust_physical_exact_step(
-    scenarios: PhysicalScenarioSet,
-    objectives: List[VoxelObjective],
-    evaluation: RobustEvaluation,
-    search_direction: List[Float64],
-    include_dmax: Bool = False,
-) raises -> Float64:
-    if len(search_direction) != scenarios.matrices[0].spot_count:
-        raise Error("search direction length does not match spot count")
-    var dmy = 0.0
-    var dsum = 0.0
-    for voxel in range(len(objectives)):
-        var ddp = abs_float(objectives[voxel].dose_p)
-        if ddp <= 0.0:
-            continue
-        var dose_d = objectives[voxel].dose_d
-        var dose_w = objectives[voxel].dose_w
-        if objectives[voxel].dose_p > 0.0:
-            var d_r_min = compute_voxel_directional_dose(
-                scenarios.matrices[evaluation.min_scenario[voxel]],
-                voxel,
-                search_direction,
-            )
-            var ddose = ddp - evaluation.dose_min[voxel]
-            dmy += ddose * dose_w / dose_d * (d_r_min * dose_w / dose_d)
-            dsum += (d_r_min * dose_w / dose_d) * (d_r_min * dose_w / dose_d)
-        elif objectives[voxel].dose_p < 0.0:
-            var d_r_max = compute_voxel_directional_dose(
-                scenarios.matrices[evaluation.max_scenario[voxel]],
-                voxel,
-                search_direction,
-            )
-            var ddose = ddp - evaluation.dose_max[voxel]
-            if ddose > 0.0:
-                ddose = 0.0
-            dmy += ddose * dose_w / dose_d * (d_r_max * dose_w / dose_d)
-            dsum += (d_r_max * dose_w / dose_d) * (d_r_max * dose_w / dose_d)
-        if include_dmax and objectives[voxel].dose_p > 0.0:
-            var d_r_max = compute_voxel_directional_dose(
-                scenarios.matrices[evaluation.max_scenario[voxel]],
-                voxel,
-                search_direction,
-            )
-            var max_w = objectives[voxel].dose_w_max
-            var ddose_max = ddp - evaluation.dose_max[voxel]
-            dmy += ddose_max * max_w / dose_d * (d_r_max * max_w / dose_d)
-            dsum += (d_r_max * max_w / dose_d) * (d_r_max * max_w / dose_d)
-    if dsum != 0.0:
-        return dmy / dsum
-    return 0.0
-
-
-def update_robust_physical(
-    scenarios: PhysicalScenarioSet,
-    objectives: List[VoxelObjective],
-    particles: List[Float64],
-    search_direction: List[Float64],
-    dmy_fac: Float64,
-    min_particles: Float64,
-    include_dmax: Bool = False,
-) raises -> StepResult:
-    var evaluation = evaluate_robust_physical(
-        scenarios, objectives, particles, include_dmax
-    )
-    var dmy = compute_robust_physical_exact_step(
-        scenarios, objectives, evaluation, search_direction, include_dmax
-    )
-    var next_particles = particles.copy()
-    for i in range(len(next_particles)):
-        next_particles[i] += dmy * dmy_fac * search_direction[i]
-        if next_particles[i] < min_particles:
-            next_particles[i] = 0.0
-    var next_evaluation = evaluate_robust_physical(
-        scenarios, objectives, next_particles, include_dmax
-    )
-    return StepResult(next_particles^, next_evaluation^, dmy)
-
-
-def fletcher_reeves_direction(
-    gradient: List[Float64],
-    previous_gradient: List[Float64],
-    previous_direction: List[Float64],
-) raises -> List[Float64]:
-    if len(gradient) != len(previous_gradient) or len(gradient) != len(
-        previous_direction
-    ):
-        raise Error("gradient/search direction length mismatch")
-    var numerator = 0.0
-    var denominator = 0.0
-    for i in range(len(gradient)):
-        numerator += gradient[i] * gradient[i]
-        denominator += previous_gradient[i] * previous_gradient[i]
-    var gamma = 0.0
-    if denominator != 0.0:
-        gamma = numerator / denominator
-    var direction = List[Float64]()
-    direction.reserve(len(gradient))
-    for i in range(len(gradient)):
-        direction.append(gradient[i] + previous_direction[i] * gamma)
-    return direction^
-
-
 def validate_physical_inputs(
     scenarios: PhysicalScenarioSet,
     objectives: List[VoxelObjective],
@@ -485,20 +213,6 @@ def validate_physical_inputs(
             raise Error("scenario voxel count mismatch")
         if scenarios.matrices[i].spot_count != spot_count:
             raise Error("scenario spot count mismatch")
-
-
-def compute_sparse_dose(
-    matrix: SparseDoseMatrix, particles: List[Float64]
-) raises -> List[Float64]:
-    if len(particles) != matrix.spot_count:
-        raise Error("particle length does not match matrix spot count")
-    var dose = List[Float64]()
-    dose.resize(matrix.voxel_count, 0.0)
-    for i in range(len(matrix.entries)):
-        dose[matrix.entries[i].voxel] += (
-            matrix.entries[i].value * particles[matrix.entries[i].spot]
-        )
-    return dose^
 
 
 def compute_biological_scenario_dose(
@@ -642,30 +356,6 @@ def scatter_bio_gradient_for_selected_scenario(
             gradient[entry.spot] += (
                 factor * grad_bio / aux.gradient_denominator * entry.g
             )
-
-
-def scatter_voxel_gradient(
-    matrix: SparseDoseMatrix,
-    voxel: Int,
-    factor: Float64,
-    mut gradient: List[Float64],
-) raises:
-    for i in range(len(matrix.entries)):
-        if matrix.entries[i].voxel == voxel:
-            gradient[matrix.entries[i].spot] += factor * matrix.entries[i].value
-
-
-def compute_voxel_directional_dose(
-    matrix: SparseDoseMatrix, voxel: Int, search_direction: List[Float64]
-) raises -> Float64:
-    var total = 0.0
-    for i in range(len(matrix.entries)):
-        if matrix.entries[i].voxel == voxel:
-            total += (
-                search_direction[matrix.entries[i].spot]
-                * matrix.entries[i].value
-            )
-    return total
 
 
 def abs_float(value: Float64) -> Float64:

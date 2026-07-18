@@ -296,9 +296,6 @@ static int TRPClinicalDoseMojoRun(
       }
       if ( transform_error ) { rc=CMDERR_ERROR|ERRTRPDOSE_PNTTRAFOFAILED; goto done; }
    }
-   p.flags=(biological?CLINICAL_DOSE_BIOLOGICAL:0) |
-      (dose_algorithm==TRPFLDDOSE_MULTIPLESCATTERDIVERGENT?
-       CLINICAL_DOSE_DIVERGENT:0);
    p.grid_voxel_count=(uint32_t)voxels; p.state_count=(uint32_t)states;
    p.field_count=fields; p.energy_count=energies; p.point_count=(uint32_t)point_count;
    p.ddd_table_count=energies; p.ddd_entry_count=(uint32_t)ddd_entries;

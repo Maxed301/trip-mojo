@@ -10,10 +10,9 @@ from optimizer import (
 )
 from optimization_problem import (
     FieldSlice,
-    OPTIMIZER_FLAG_INITIALIZE,
     evaluate_physical_objective,
 )
-from test_optimization_problem import build_problem
+from tests.test_optimization_problem import build_problem
 
 
 def test_full_iteration_reduces_chi2() raises:
@@ -77,7 +76,6 @@ def test_initialization_is_not_counted_as_trip_iteration() raises:
     var problem = build_problem()
     problem.particles[0] = 0.0
     problem.particles[1] = 0.0
-    problem.settings.flags |= OPTIMIZER_FLAG_INITIALIZE
     problem.settings.max_iterations = UInt32(1)
     var initial = evaluate_objective(problem, problem.particles)
     assert_equal(initial.gradient_norm, 0.0)
@@ -89,7 +87,6 @@ def test_initialization_is_not_counted_as_trip_iteration() raises:
 
 def test_initialization_prefers_packed_host_direction() raises:
     var problem = build_problem()
-    problem.settings.flags |= OPTIMIZER_FLAG_INITIALIZE
     problem.initial_direction[0] = 7.0
     problem.initial_direction[1] = 11.0
     var direction = initial_direction(problem, [3.0, 5.0])

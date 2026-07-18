@@ -7,21 +7,9 @@
 extern "C" {
 #endif
 
-enum {
-    MOJO_MATRIX_FLAG_DEVICE_ONLY = 1u << 0,
-    MOJO_MATRIX_FLAG_FORCE_PROCEDURAL = 1u << 1,
-    MOJO_MATRIX_DEVICE_ID_SHIFT = 8,
-    MOJO_MATRIX_DEVICE_ID_MASK = 0xffu << MOJO_MATRIX_DEVICE_ID_SHIFT,
-};
-
-enum {
-    MOJO_MATRIX_RESULT_PROCEDURAL = 1u << 0,
-};
-
 typedef struct {
     uint64_t point_offset;
     uint32_t point_count;
-    uint32_t reserved;
 } MojoMatrixEnergySlice;
 
 typedef struct {
@@ -33,7 +21,6 @@ typedef struct {
 typedef struct {
     uint64_t slice_offset;
     uint32_t slice_count;
-    uint32_t reserved;
     double bev_x;
     double bev_y;
     double relative_cutoff;
@@ -78,7 +65,8 @@ typedef struct {
     uint64_t slice_count;
     uint64_t point_count;
     uint32_t ddd_table_count;
-    uint32_t flags;
+    uint32_t device_only;
+    uint32_t device_id;
     uint64_t ddd_entry_count;
     const MojoMatrixEnergySlice *energy_slices;
     const MojoMatrixPoint *points;
@@ -93,7 +81,7 @@ typedef struct {
     uint64_t entry_count;
     uint64_t slice_count;
     uint32_t group_count;
-    uint32_t flags;
+    uint32_t procedural;
     const double *group_maximum;
     const uint32_t *group_entry_counts;
     const uint32_t *slice_entry_counts;

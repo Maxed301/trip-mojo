@@ -25,8 +25,8 @@ from clinical_dose import (
     ClinicalDoseState,
     DDDInterpolation,
     CLINICAL_DOSE_8LN2,
-    CLINICAL_DOSE_BIOLOGICAL,
-    CLINICAL_DOSE_DIVERGENT,
+    CLINICAL_DOSE_ALGORITHM_MSDB,
+    CLINICAL_DOSE_BIOLOGY_LOW_DOSE,
     CLINICAL_DOSE_PI,
     build_dense_hlut,
     interpolate_bio,
@@ -134,10 +134,12 @@ def clinical_dose_kernel(
     var voxel = work_index - state_index * voxel_count
 
     var result = ClinicalDoseOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    var flags = UInt32(integer_metadata[1])
     var field_count = Int(integer_metadata[2])
     var voi_count = Int(integer_metadata[3])
-    var biological = (flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0)
+    var biological = (
+        UInt32(integer_metadata[1]) == CLINICAL_DOSE_BIOLOGY_LOW_DOSE
+    )
+    var divergent = UInt32(integer_metadata[11]) == CLINICAL_DOSE_ALGORITHM_MSDB
     var voi = -1
     if biological:
         voi = Int(voxel_voi[voxel])
@@ -216,7 +218,7 @@ def clinical_dose_kernel(
         var field = fields[Int(grid_field.field_index)].copy()
         var divergence_x = 0.0
         var divergence_y = 0.0
-        if (flags & CLINICAL_DOSE_DIVERGENT) != UInt32(0):
+        if divergent:
             if field.scanner_x != 0.0:
                 divergence_x = gz / Float64(field.scanner_x)
             if field.scanner_y != 0.0:
@@ -379,7 +381,7 @@ def compute_clinical_dose_accelerator(
 
     var integer_metadata: List[Int64] = [
         Int64(view.grid_voxel_count),
-        Int64(view.flags),
+        Int64(view.biology_model),
         Int64(view.field_count),
         Int64(view.voi_count),
         Int64(view.state_count),
@@ -389,6 +391,7 @@ def compute_clinical_dose_accelerator(
         Int64(view.dose_x_offset),
         Int64(view.dose_y_offset),
         Int64(view.dose_z_offset),
+        Int64(view.algorithm),
     ]
     var floating_metadata: List[Float64] = [
         view.dose_grid.x0,
@@ -411,9 +414,8 @@ def compute_clinical_dose_accelerator(
         context,
         view.voxel_voi.bitcast[UInt8](),
         (
-            Int(view.grid_voxel_count)
-            * size_of[Int32]() if (view.flags & CLINICAL_DOSE_BIOLOGICAL)
-            != UInt32(0) else 0
+            Int(view.grid_voxel_count) * size_of[Int32]() if view.biology_model
+            == CLINICAL_DOSE_BIOLOGY_LOW_DOSE else 0
         ),
     )
     var ct_state_device = _copy_bytes_to_device(

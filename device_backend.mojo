@@ -7,13 +7,10 @@ from std.gpu import barrier, global_idx, lane_id, thread_idx
 from std.gpu.host import DeviceBuffer, DeviceContext
 from std.gpu.memory import AddressSpace
 from std.gpu.primitives import warp
-from std.math import sqrt
 from std.memory import bitcast, stack_allocation
 
 from optimization_problem import (
     OptimizationProblem,
-    OPTIMIZER_FLAG_BIOLOGICAL,
-    OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX,
     FLOAT64_EPSILON,
     MEV_TO_GY,
 )
@@ -28,11 +25,9 @@ from matrix_builder import (
 comptime DEVICE_BLOCK_SIZE = 128
 comptime REDUCTION_BLOCK_SIZE = 256
 comptime SPARSE_GROUP_SIZE = 32
-comptime DEVICE_MIXED32 = False
 comptime DEVICE_HOST_THREADS = 16
-comptime DEVICE_DTYPE = (DType.float32 if DEVICE_MIXED32 else DType.float64)
-comptime DEVICE_MEV_TO_GY = Scalar[DEVICE_DTYPE](MEV_TO_GY)
-comptime DEVICE_EPSILON = Scalar[DEVICE_DTYPE](FLOAT64_EPSILON)
+comptime DEVICE_MEV_TO_GY = Scalar[DType.float64](MEV_TO_GY)
+comptime DEVICE_EPSILON = Scalar[DType.float64](FLOAT64_EPSILON)
 
 
 def device_sqrt64(value: Float64) -> Float64:
@@ -54,47 +49,33 @@ def device_sqrt64(value: Float64) -> Float64:
 
 
 def device_sqrt(
-    value: Scalar[DEVICE_DTYPE],
-) -> Scalar[DEVICE_DTYPE]:
-    comptime if DEVICE_MIXED32:
-        return sqrt(value)
-    else:
-        return Scalar[DEVICE_DTYPE](device_sqrt64(Float64(value)))
+    value: Scalar[DType.float64],
+) -> Scalar[DType.float64]:
+    return Scalar[DType.float64](device_sqrt64(Float64(value)))
 
 
 @always_inline
-def _pack_value(value: Float64) -> Scalar[DEVICE_DTYPE]:
-    return Scalar[DEVICE_DTYPE](value)
+def _pack_value(value: Float64) -> Scalar[DType.float64]:
+    return Scalar[DType.float64](value)
 
 
 def warp_sum(
-    value: Scalar[DEVICE_DTYPE],
-) -> Scalar[DEVICE_DTYPE]:
+    value: Scalar[DType.float64],
+) -> Scalar[DType.float64]:
     var group_lane = Int(lane_id()) % SPARSE_GROUP_SIZE
     var offset = UInt32(SPARSE_GROUP_SIZE // 2)
-    comptime if DEVICE_MIXED32:
-        var total = value
-        while offset > UInt32(0):
-            var other = warp.shuffle_down(total, offset)
-            if group_lane < Int(offset):
-                total += other
-            offset >>= 1
-        return total
-    else:
-        var total = value
-        while offset > UInt32(0):
-            var bits = bitcast[DType.uint64](Float64(total))
-            var low = UInt32(bits & UInt64(0xFFFFFFFF))
-            var high = UInt32(bits >> 32)
-            var other_bits = UInt64(warp.shuffle_down(low, offset)) | (
-                UInt64(warp.shuffle_down(high, offset)) << 32
-            )
-            if group_lane < Int(offset):
-                total += Scalar[DEVICE_DTYPE](
-                    bitcast[DType.float64](other_bits)
-                )
-            offset >>= 1
-        return total
+    var total = value
+    while offset > UInt32(0):
+        var bits = bitcast[DType.uint64](Float64(total))
+        var low = UInt32(bits & UInt64(0xFFFFFFFF))
+        var high = UInt32(bits >> 32)
+        var other_bits = UInt64(warp.shuffle_down(low, offset)) | (
+            UInt64(warp.shuffle_down(high, offset)) << 32
+        )
+        if group_lane < Int(offset):
+            total += Scalar[DType.float64](bitcast[DType.float64](other_bits))
+        offset >>= 1
+    return total
 
 
 @fieldwise_init
@@ -189,13 +170,6 @@ def partition_voxels(
     return shards^
 
 
-def partition_voxels_for_two_devices(
-    problem: OptimizationProblem,
-) raises -> Tuple[DeviceShard, DeviceShard]:
-    var shards = partition_voxels(problem, 2)
-    return (shards[0].copy(), shards[1].copy())
-
-
 def _copy_list_range_to_device[
     dtype: DType
 ](
@@ -218,27 +192,13 @@ def _copy_coefficient_range_to_device(
     offset: Int,
     count: Int,
     synchronize: Bool = True,
-) raises -> DeviceBuffer[DEVICE_DTYPE]:
-    comptime if DEVICE_MIXED32:
-        var host = context.enqueue_create_host_buffer[DEVICE_DTYPE](count)
-        var tensor = TileTensor(host, row_major(Idx(count)))
-        comptime assert tensor.flat_rank == 1
-        for i in range(count):
-            tensor[i] = Scalar[DEVICE_DTYPE](values[offset + i])
-        var device = context.enqueue_create_buffer[DEVICE_DTYPE](count)
-        context.enqueue_copy(device, host)
-        if synchronize:
-            context.synchronize()
-        return device^
-    else:
-        var device = context.enqueue_create_buffer[DEVICE_DTYPE](count)
-        var source = (values.unsafe_ptr() + offset).bitcast[
-            Scalar[DEVICE_DTYPE]
-        ]()
-        context.enqueue_copy[DEVICE_DTYPE](device, source)
-        if synchronize:
-            context.synchronize()
-        return device^
+) raises -> DeviceBuffer[DType.float64]:
+    var device = context.enqueue_create_buffer[DType.float64](count)
+    var source = (values.unsafe_ptr() + offset).bitcast[Scalar[DType.float64]]()
+    context.enqueue_copy[DType.float64](device, source)
+    if synchronize:
+        context.synchronize()
+    return device^
 
 
 @always_inline
@@ -263,15 +223,15 @@ def _matrix_coefficient[
     slice_groups: UnsafePointer[UInt32, MutAnyOrigin],
     slice_energy: UnsafePointer[UInt32, MutAnyOrigin],
     slice_values: UnsafePointer[Float64, MutAnyOrigin],
-    coefficients: TileTensor[DEVICE_DTYPE, CoefficientLayout, MutAnyOrigin],
+    coefficients: TileTensor[DType.float64, CoefficientLayout, MutAnyOrigin],
     slice: Int,
     local_point: Int,
     coefficient: Int,
-) -> Scalar[DEVICE_DTYPE]:
+) -> Scalar[DType.float64]:
     comptime assert coefficients.flat_rank == 1
     if procedural != UInt32(0):
         var group = groups[Int(slice_groups[slice])].copy()
-        return Scalar[DEVICE_DTYPE](
+        return Scalar[DType.float64](
             _contribution(
                 energy_slices,
                 points,
@@ -282,9 +242,7 @@ def _matrix_coefficient[
                 local_point,
             )
         )
-    return Scalar[DEVICE_DTYPE](
-        rebind[Scalar[DEVICE_DTYPE]](coefficients[coefficient])
-    )
+    return rebind[Scalar[DType.float64]](coefficients[coefficient])
 
 
 def sparse_slice_dot_kernel[
@@ -308,9 +266,9 @@ def sparse_slice_dot_kernel[
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
-    coefficients: TileTensor[DEVICE_DTYPE, CoefficientLayout, MutAnyOrigin],
-    particles: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
-    output: TileTensor[DEVICE_DTYPE, SliceLayout, MutAnyOrigin],
+    coefficients: TileTensor[DType.float64, CoefficientLayout, MutAnyOrigin],
+    particles: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
+    output: TileTensor[DType.float64, SliceLayout, MutAnyOrigin],
     slice_count: Int,
 ):
     comptime assert field_point_offsets.flat_rank == 1
@@ -322,7 +280,7 @@ def sparse_slice_dot_kernel[
     comptime assert output.flat_rank == 1
     var lane = thread_idx.x % SPARSE_GROUP_SIZE
     var slice = global_idx.x // SPARSE_GROUP_SIZE
-    var total: Scalar[DEVICE_DTYPE] = 0.0
+    var total: Scalar[DType.float64] = 0.0
     if slice < slice_count:
         var metadata = rebind[Scalar[DType.uint64]](slice_metadata[slice])
         var field = Int(metadata >> 32)
@@ -349,10 +307,10 @@ def sparse_slice_dot_kernel[
                 Int(rebind[Scalar[DType.uint32]](matrix_slice_indices[slice])),
                 local_point,
                 coefficient,
-            ) * rebind[Scalar[DEVICE_DTYPE]](particles[point])
+            ) * rebind[Scalar[DType.float64]](particles[point])
     var sums = stack_allocation[
         DEVICE_BLOCK_SIZE,
-        Scalar[DEVICE_DTYPE],
+        Scalar[DType.float64],
         address_space=AddressSpace.SHARED,
     ]()
     var thread = thread_idx.x
@@ -400,11 +358,11 @@ def biological_moment_fused_kernel[
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
-    coefficients: TileTensor[DEVICE_DTYPE, CoefficientLayout, MutAnyOrigin],
-    particles: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
-    scenario_state: TileTensor[DEVICE_DTYPE, StateLayout, MutAnyOrigin],
-    slice_factors: TileTensor[DEVICE_DTYPE, FactorLayout, MutAnyOrigin],
-    moments: TileTensor[DEVICE_DTYPE, MomentLayout, MutAnyOrigin],
+    coefficients: TileTensor[DType.float64, CoefficientLayout, MutAnyOrigin],
+    particles: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
+    scenario_state: TileTensor[DType.float64, StateLayout, MutAnyOrigin],
+    slice_factors: TileTensor[DType.float64, FactorLayout, MutAnyOrigin],
+    moments: TileTensor[DType.float64, MomentLayout, MutAnyOrigin],
     scenario_count: Int,
 ):
     comptime assert field_point_offsets.flat_rank == 1
@@ -423,11 +381,11 @@ def biological_moment_fused_kernel[
     if scenario >= scenario_count:
         return
     var state = scenario * 4
-    var dose = rebind[Scalar[DEVICE_DTYPE]](scenario_state[state])
-    var alpha = rebind[Scalar[DEVICE_DTYPE]](scenario_state[state + 1])
-    var sqrt_beta = rebind[Scalar[DEVICE_DTYPE]](scenario_state[state + 2])
-    var let_mix = rebind[Scalar[DEVICE_DTYPE]](scenario_state[state + 3])
-    var let_bar: Scalar[DEVICE_DTYPE] = 0.0
+    var dose = rebind[Scalar[DType.float64]](scenario_state[state])
+    var alpha = rebind[Scalar[DType.float64]](scenario_state[state + 1])
+    var sqrt_beta = rebind[Scalar[DType.float64]](scenario_state[state + 2])
+    var let_mix = rebind[Scalar[DType.float64]](scenario_state[state + 3])
+    var let_bar: Scalar[DType.float64] = 0.0
     var scenario_offset = Int(
         rebind[Scalar[DType.uint64]](scenario_slice_offsets[scenario])
     )
@@ -445,7 +403,7 @@ def biological_moment_fused_kernel[
             rebind[Scalar[DType.uint64]](slice_offsets[slice])
         )
         var coefficient_count = Int(metadata & UInt64(0xFFFFFFFF))
-        var dot: Scalar[DEVICE_DTYPE] = 0.0
+        var dot: Scalar[DType.float64] = 0.0
         for entry in range(lane, coefficient_count, SPARSE_GROUP_SIZE):
             var coefficient = coefficient_offset + entry
             var local_point = _coefficient_point(
@@ -464,24 +422,22 @@ def biological_moment_fused_kernel[
                 Int(rebind[Scalar[DType.uint32]](matrix_slice_indices[slice])),
                 local_point,
                 coefficient,
-            ) * rebind[Scalar[DEVICE_DTYPE]](particles[point])
+            ) * rebind[Scalar[DType.float64]](particles[point])
         dot = warp_sum(dot)
         if lane == 0:
             var factor = slice * 5
-            dose += dot * Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[factor])
+            dose += dot * rebind[Scalar[DType.float64]](slice_factors[factor])
+            alpha += dot * rebind[Scalar[DType.float64]](
+                slice_factors[factor + 1]
             )
-            alpha += dot * Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[factor + 1])
+            sqrt_beta += dot * rebind[Scalar[DType.float64]](
+                slice_factors[factor + 2]
             )
-            sqrt_beta += dot * Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[factor + 2])
+            let_mix += dot * rebind[Scalar[DType.float64]](
+                slice_factors[factor + 3]
             )
-            let_mix += dot * Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[factor + 3])
-            )
-            let_bar += dot * Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[factor + 4])
+            let_bar += dot * rebind[Scalar[DType.float64]](
+                slice_factors[factor + 4]
             )
     if lane == 0:
         var output = scenario * 5
@@ -499,14 +455,14 @@ def objective_kernel[
     ResultLayout: TensorLayout,
     IndexLayout: TensorLayout,
 ](
-    voxel_data: TileTensor[DEVICE_DTYPE, VoxelDataLayout, MutAnyOrigin],
-    moments: TileTensor[DEVICE_DTYPE, MomentLayout, MutAnyOrigin],
-    scenario_bio: TileTensor[DEVICE_DTYPE, BioLayout, MutAnyOrigin],
-    voxel_results: TileTensor[DEVICE_DTYPE, ResultLayout, MutAnyOrigin],
+    voxel_data: TileTensor[DType.float64, VoxelDataLayout, MutAnyOrigin],
+    moments: TileTensor[DType.float64, MomentLayout, MutAnyOrigin],
+    scenario_bio: TileTensor[DType.float64, BioLayout, MutAnyOrigin],
+    voxel_results: TileTensor[DType.float64, ResultLayout, MutAnyOrigin],
     scenario_indices: TileTensor[DType.int32, IndexLayout, MutAnyOrigin],
     voxel_count: Int,
     scenario_count: Int,
-    flags: UInt32,
+    include_dmax: UInt32,
     biological: UInt32,
 ):
     comptime assert voxel_data.flat_rank == 1
@@ -518,7 +474,7 @@ def objective_kernel[
     if voxel >= voxel_count:
         return
     var voxel_offset = voxel * 13
-    var prescribed = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset])
+    var prescribed = rebind[Scalar[DType.float64]](voxel_data[voxel_offset])
     var prescribed_abs = prescribed
     if prescribed_abs < 0.0:
         prescribed_abs = -prescribed_abs
@@ -529,44 +485,46 @@ def objective_kernel[
     var initial_max_scenario = Int(
         rebind[Scalar[DType.int32]](scenario_indices[index + 1])
     )
-    var dose_weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 1])
-    var dose_divisor = rebind[Scalar[DEVICE_DTYPE]](
+    var dose_weight = rebind[Scalar[DType.float64]](
+        voxel_data[voxel_offset + 1]
+    )
+    var dose_divisor = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 2]
     )
-    var maximum_weight = rebind[Scalar[DEVICE_DTYPE]](
+    var maximum_weight = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 3]
     )
-    var initial_dose = rebind[Scalar[DEVICE_DTYPE]](
+    var initial_dose = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 4]
     )
-    var prescribed_let = rebind[Scalar[DEVICE_DTYPE]](
+    var prescribed_let = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 5]
     )
-    var let_weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 6])
-    var rbe_cut = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 8])
-    var rbe_alpha = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 9])
-    var rbe_beta = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 10])
-    var rbe_slope = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 11])
-    var rbe_damage_cut = rebind[Scalar[DEVICE_DTYPE]](
+    var let_weight = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 6])
+    var rbe_cut = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 8])
+    var rbe_alpha = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 9])
+    var rbe_beta = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 10])
+    var rbe_slope = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 11])
+    var rbe_damage_cut = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 12]
     )
     var scenario_base = voxel * scenario_count
-    var dose_min: Scalar[DEVICE_DTYPE] = 0.0
-    var dose_max: Scalar[DEVICE_DTYPE] = 0.0
+    var dose_min: Scalar[DType.float64] = 0.0
+    var dose_max: Scalar[DType.float64] = 0.0
     var min_scenario = 0
     var max_scenario = 0
     for scenario in range(scenario_count):
         var scenario_index = scenario_base + scenario
         var moment = scenario_index * 5
-        var dose_phys = rebind[Scalar[DEVICE_DTYPE]](moments[moment])
-        var alpha = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 1])
-        var sqrt_beta = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 2])
-        var let_mix = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 3])
-        var let_bar_sum = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 4])
+        var dose_phys = rebind[Scalar[DType.float64]](moments[moment])
+        var alpha = rebind[Scalar[DType.float64]](moments[moment + 1])
+        var sqrt_beta = rebind[Scalar[DType.float64]](moments[moment + 2])
+        var let_mix = rebind[Scalar[DType.float64]](moments[moment + 3])
+        var let_bar_sum = rebind[Scalar[DType.float64]](moments[moment + 4])
         var dose = initial_dose
-        var let_bar: Scalar[DEVICE_DTYPE] = 0.0
+        var let_bar: Scalar[DType.float64] = 0.0
         var dose_phs = let_mix * DEVICE_MEV_TO_GY
-        var denominator: Scalar[DEVICE_DTYPE] = 0.0
+        var denominator: Scalar[DType.float64] = 0.0
         if biological == UInt32(0):
             dose += dose_phys * DEVICE_MEV_TO_GY
         elif dose_phys > 0.0 and let_mix > 0.0:
@@ -626,15 +584,15 @@ def objective_kernel[
     if prescribed < 0.0:
         selected = max_scenario
         selected_dose = dose_max
-    var chi2: Scalar[DEVICE_DTYPE] = 0.0
-    var weighted: Scalar[DEVICE_DTYPE] = 0.0
+    var chi2: Scalar[DType.float64] = 0.0
+    var weighted: Scalar[DType.float64] = 0.0
     if prescribed_abs != 0.0:
         var residual = prescribed_abs - selected_dose
         var weight = dose_weight / dose_divisor
-        var selected_let = rebind[Scalar[DEVICE_DTYPE]](
+        var selected_let = rebind[Scalar[DType.float64]](
             scenario_bio[(scenario_base + selected) * 4 + 1]
         )
-        var let_residual: Scalar[DEVICE_DTYPE] = 0.0
+        var let_residual: Scalar[DType.float64] = 0.0
         if (
             biological != UInt32(0)
             and let_weight > DEVICE_EPSILON
@@ -651,9 +609,7 @@ def objective_kernel[
             chi2 += (residual * weight) * (residual * weight)
             chi2 += let_residual * let_residual
         weighted += (weight * prescribed) * (weight * prescribed)
-        if (flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX) != UInt32(
-            0
-        ) and prescribed > 0.0:
+        if include_dmax != UInt32(0) and prescribed > 0.0:
             var max_weight = maximum_weight / dose_divisor
             var max_residual = prescribed_abs - dose_max
             chi2 += (max_residual * max_weight) * (max_residual * max_weight)
@@ -681,23 +637,23 @@ def slice_gradient_kernel[
     SliceLayout: TensorLayout,
     FactorLayout: TensorLayout,
 ](
-    voxel_data: TileTensor[DEVICE_DTYPE, VoxelDataLayout, MutAnyOrigin],
+    voxel_data: TileTensor[DType.float64, VoxelDataLayout, MutAnyOrigin],
     scenario_slice_offsets: TileTensor[
         DType.uint64, ScenarioLayout, MutAnyOrigin
     ],
     scenario_slice_counts: TileTensor[
         DType.uint32, ScenarioLayout, MutAnyOrigin
     ],
-    moments: TileTensor[DEVICE_DTYPE, MomentLayout, MutAnyOrigin],
-    scenario_bio: TileTensor[DEVICE_DTYPE, BioLayout, MutAnyOrigin],
-    voxel_results: TileTensor[DEVICE_DTYPE, ResultLayout, MutAnyOrigin],
+    moments: TileTensor[DType.float64, MomentLayout, MutAnyOrigin],
+    scenario_bio: TileTensor[DType.float64, BioLayout, MutAnyOrigin],
+    voxel_results: TileTensor[DType.float64, ResultLayout, MutAnyOrigin],
     scenario_indices: TileTensor[DType.int32, IndexLayout, MutAnyOrigin],
-    slice_factors: TileTensor[DEVICE_DTYPE, FactorLayout, MutAnyOrigin],
-    slice_gradient: TileTensor[DEVICE_DTYPE, SliceLayout, MutAnyOrigin],
+    slice_factors: TileTensor[DType.float64, FactorLayout, MutAnyOrigin],
+    slice_gradient: TileTensor[DType.float64, SliceLayout, MutAnyOrigin],
     voxel_count: Int,
     scenarios_per_voxel: Int,
-    flags: UInt32,
-    overdose_weight: Scalar[DEVICE_DTYPE],
+    include_dmax: UInt32,
+    overdose_weight: Scalar[DType.float64],
     biological: UInt32,
 ):
     comptime assert voxel_data.flat_rank == 1
@@ -713,26 +669,28 @@ def slice_gradient_kernel[
     if voxel >= voxel_count:
         return
     var voxel_offset = voxel * 13
-    var prescribed = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset])
+    var prescribed = rebind[Scalar[DType.float64]](voxel_data[voxel_offset])
     var prescribed_abs = prescribed
     if prescribed_abs < 0.0:
         prescribed_abs = -prescribed_abs
-    var dose_weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 1])
-    var dose_divisor = rebind[Scalar[DEVICE_DTYPE]](
+    var dose_weight = rebind[Scalar[DType.float64]](
+        voxel_data[voxel_offset + 1]
+    )
+    var dose_divisor = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 2]
     )
-    var maximum_weight = rebind[Scalar[DEVICE_DTYPE]](
+    var maximum_weight = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 3]
     )
-    var prescribed_let = rebind[Scalar[DEVICE_DTYPE]](
+    var prescribed_let = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 5]
     )
-    var let_weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 6])
-    var overdose_tolerance = rebind[Scalar[DEVICE_DTYPE]](
+    var let_weight = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 6])
+    var overdose_tolerance = rebind[Scalar[DType.float64]](
         voxel_data[voxel_offset + 7]
     )
-    var rbe_cut = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 8])
-    var rbe_slope = rebind[Scalar[DEVICE_DTYPE]](voxel_data[voxel_offset + 11])
+    var rbe_cut = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 8])
+    var rbe_slope = rebind[Scalar[DType.float64]](voxel_data[voxel_offset + 11])
     var scenario_base = voxel * scenarios_per_voxel
     var index = voxel * 2
     var min_scenario = Int(rebind[Scalar[DType.int32]](scenario_indices[index]))
@@ -740,20 +698,18 @@ def slice_gradient_kernel[
         rebind[Scalar[DType.int32]](scenario_indices[index + 1])
     )
     var pass_count = 1
-    if (flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX) != UInt32(
-        0
-    ) and prescribed > 0.0:
+    if include_dmax != UInt32(0) and prescribed > 0.0:
         pass_count = 2
     for gradient_pass in range(pass_count):
         var selected = max_scenario
-        var selected_dose = rebind[Scalar[DEVICE_DTYPE]](
+        var selected_dose = rebind[Scalar[DType.float64]](
             voxel_results[voxel * 4 + 1]
         )
         var pass_weight = dose_weight
         if gradient_pass == 0:
             if prescribed > 0.0:
                 selected = min_scenario
-                selected_dose = rebind[Scalar[DEVICE_DTYPE]](
+                selected_dose = rebind[Scalar[DType.float64]](
                     voxel_results[voxel * 4]
                 )
         else:
@@ -783,25 +739,25 @@ def slice_gradient_kernel[
                 continue
             for local_slice in range(slice_count):
                 var slice = slice_offset + local_slice
-                var dose_factor = Scalar[DEVICE_DTYPE](
-                    rebind[Scalar[DEVICE_DTYPE]](slice_factors[slice * 5])
+                var dose_factor = rebind[Scalar[DType.float64]](
+                    slice_factors[slice * 5]
                 )
-                var prior = rebind[Scalar[DEVICE_DTYPE]](slice_gradient[slice])
+                var prior = rebind[Scalar[DType.float64]](slice_gradient[slice])
                 slice_gradient[slice] = rebind[slice_gradient.ElementType](
                     prior + factor * dose_factor * DEVICE_MEV_TO_GY
                 )
             continue
         var moment = scenario * 5
-        var let_mix = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 3])
+        var let_mix = rebind[Scalar[DType.float64]](moments[moment + 3])
         if residual == 0.0 or let_mix <= 0.0:
             continue
-        var alpha = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 1])
-        var sqrt_beta = rebind[Scalar[DEVICE_DTYPE]](moments[moment + 2])
+        var alpha = rebind[Scalar[DType.float64]](moments[moment + 1])
+        var sqrt_beta = rebind[Scalar[DType.float64]](moments[moment + 2])
         var bio = scenario * 4
-        var let_bar = rebind[Scalar[DEVICE_DTYPE]](scenario_bio[bio + 1])
-        var dose_phs = rebind[Scalar[DEVICE_DTYPE]](scenario_bio[bio + 2])
-        var denominator = rebind[Scalar[DEVICE_DTYPE]](scenario_bio[bio + 3])
-        var let_residual: Scalar[DEVICE_DTYPE] = 0.0
+        var let_bar = rebind[Scalar[DType.float64]](scenario_bio[bio + 1])
+        var dose_phs = rebind[Scalar[DType.float64]](scenario_bio[bio + 2])
+        var denominator = rebind[Scalar[DType.float64]](scenario_bio[bio + 3])
+        var let_residual: Scalar[DType.float64] = 0.0
         if let_weight > DEVICE_EPSILON and prescribed_let > 0.0:
             let_residual = prescribed_let - let_bar
             if prescribed > 0.0:
@@ -813,20 +769,20 @@ def slice_gradient_kernel[
         for local_slice in range(slice_count):
             var slice = slice_offset + local_slice
             var packed = slice * 5
-            var slice_alpha = Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[packed + 1])
+            var slice_alpha = rebind[Scalar[DType.float64]](
+                slice_factors[packed + 1]
             )
-            var slice_sqrt_beta = Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[packed + 2])
+            var slice_sqrt_beta = rebind[Scalar[DType.float64]](
+                slice_factors[packed + 2]
             )
-            var slice_let_mix = Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[packed + 3])
+            var slice_let_mix = rebind[Scalar[DType.float64]](
+                slice_factors[packed + 3]
             )
-            var slice_let_bar = Scalar[DEVICE_DTYPE](
-                rebind[Scalar[DEVICE_DTYPE]](slice_factors[packed + 4])
+            var slice_let_bar = rebind[Scalar[DType.float64]](
+                slice_factors[packed + 4]
             )
             var let_prim = (slice_let_bar - let_bar * slice_let_mix) / let_mix
-            var grad_bio: Scalar[DEVICE_DTYPE]
+            var grad_bio: Scalar[DType.float64]
             if dose_phs <= rbe_cut:
                 grad_bio = (
                     slice_alpha
@@ -845,7 +801,7 @@ def slice_gradient_kernel[
             var scale = (
                 factor * grad_bio / denominator + let_residual * let_prim
             )
-            var prior = rebind[Scalar[DEVICE_DTYPE]](slice_gradient[slice])
+            var prior = rebind[Scalar[DType.float64]](slice_gradient[slice])
             slice_gradient[slice] = rebind[slice_gradient.ElementType](
                 prior + scale
             )
@@ -873,12 +829,12 @@ def sparse_gradient_backprojection_kernel[
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
-    coefficients: TileTensor[DEVICE_DTYPE, CoefficientLayout, MutAnyOrigin],
+    coefficients: TileTensor[DType.float64, CoefficientLayout, MutAnyOrigin],
     point_active: TileTensor[DType.uint8, PointLayout, MutAnyOrigin],
-    particles: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
-    slice_gradient: TileTensor[DEVICE_DTYPE, SliceLayout, MutAnyOrigin],
+    particles: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
+    slice_gradient: TileTensor[DType.float64, SliceLayout, MutAnyOrigin],
     active_slices: TileTensor[DType.uint32, ActiveLayout, MutAnyOrigin],
-    gradient: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
+    gradient: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
     active_count: Int,
 ):
     comptime assert field_point_offsets.flat_rank == 1
@@ -895,7 +851,7 @@ def sparse_gradient_backprojection_kernel[
     if active >= active_count:
         return
     var slice = Int(rebind[Scalar[DType.uint32]](active_slices[active]))
-    var scale = rebind[Scalar[DEVICE_DTYPE]](slice_gradient[slice])
+    var scale = rebind[Scalar[DType.float64]](slice_gradient[slice])
     if scale == 0.0:
         return
     var metadata = rebind[Scalar[DType.uint64]](slice_metadata[slice])
@@ -912,7 +868,7 @@ def sparse_gradient_backprojection_kernel[
         var point = point_base + local_point
         if (
             rebind[Scalar[DType.uint8]](point_active[point]) != UInt8(0)
-            and rebind[Scalar[DEVICE_DTYPE]](particles[point]) != 0.0
+            and rebind[Scalar[DType.float64]](particles[point]) != 0.0
         ):
             var contribution = scale * _matrix_coefficient(
                 procedural,
@@ -937,7 +893,7 @@ def active_slice_list_kernel[
     CountLayout: TensorLayout,
     ActiveLayout: TensorLayout,
 ](
-    slice_gradient: TileTensor[DEVICE_DTYPE, SliceLayout, MutAnyOrigin],
+    slice_gradient: TileTensor[DType.float64, SliceLayout, MutAnyOrigin],
     active_count: TileTensor[DType.uint32, CountLayout, MutAnyOrigin],
     active_slices: TileTensor[DType.uint32, ActiveLayout, MutAnyOrigin],
     slice_count: Int,
@@ -948,7 +904,7 @@ def active_slice_list_kernel[
     var slice = global_idx.x
     if slice >= slice_count:
         return
-    if rebind[Scalar[DEVICE_DTYPE]](slice_gradient[slice]) != 0.0:
+    if rebind[Scalar[DType.float64]](slice_gradient[slice]) != 0.0:
         var write = Atomic.fetch_add[ordering=Ordering.RELAXED](
             active_count.ptr, UInt32(1)
         )
@@ -963,15 +919,15 @@ def bootstrap_slice_gradient_kernel[
     FactorLayout: TensorLayout,
     SliceLayout: TensorLayout,
 ](
-    voxel_data: TileTensor[DEVICE_DTYPE, VoxelDataLayout, MutAnyOrigin],
+    voxel_data: TileTensor[DType.float64, VoxelDataLayout, MutAnyOrigin],
     scenario_slice_offsets: TileTensor[
         DType.uint64, ScenarioLayout, MutAnyOrigin
     ],
     scenario_slice_counts: TileTensor[
         DType.uint32, ScenarioLayout, MutAnyOrigin
     ],
-    slice_factors: TileTensor[DEVICE_DTYPE, FactorLayout, MutAnyOrigin],
-    slice_gradient: TileTensor[DEVICE_DTYPE, SliceLayout, MutAnyOrigin],
+    slice_factors: TileTensor[DType.float64, FactorLayout, MutAnyOrigin],
+    slice_gradient: TileTensor[DType.float64, SliceLayout, MutAnyOrigin],
     voxel_count: Int,
     scenarios_per_voxel: Int,
 ):
@@ -984,11 +940,11 @@ def bootstrap_slice_gradient_kernel[
     if voxel >= voxel_count:
         return
     var data = voxel * 13
-    var prescribed = rebind[Scalar[DEVICE_DTYPE]](voxel_data[data])
+    var prescribed = rebind[Scalar[DType.float64]](voxel_data[data])
     if prescribed <= 0.0:
         return
-    var weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[data + 1]) / rebind[
-        Scalar[DEVICE_DTYPE]
+    var weight = rebind[Scalar[DType.float64]](voxel_data[data + 1]) / rebind[
+        Scalar[DType.float64]
     ](voxel_data[data + 2])
     var scale = prescribed * weight * (2.0 * weight)
     scale *= DEVICE_MEV_TO_GY
@@ -1001,7 +957,7 @@ def bootstrap_slice_gradient_kernel[
     )
     for local_slice in range(count):
         var slice = offset + local_slice
-        var dose = rebind[Scalar[DEVICE_DTYPE]](slice_factors[slice * 5])
+        var dose = rebind[Scalar[DType.float64]](slice_factors[slice * 5])
         slice_gradient[slice] = rebind[slice_gradient.ElementType](scale * dose)
 
 
@@ -1027,10 +983,10 @@ def bootstrap_backprojection_kernel[
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
-    coefficients: TileTensor[DEVICE_DTYPE, CoefficientLayout, MutAnyOrigin],
-    slice_gradient: TileTensor[DEVICE_DTYPE, SliceLayout, MutAnyOrigin],
+    coefficients: TileTensor[DType.float64, CoefficientLayout, MutAnyOrigin],
+    slice_gradient: TileTensor[DType.float64, SliceLayout, MutAnyOrigin],
     active_slices: TileTensor[DType.uint32, ActiveLayout, MutAnyOrigin],
-    gradient: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
+    gradient: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
     active_count: Int,
 ):
     comptime assert field_point_offsets.flat_rank == 1
@@ -1045,7 +1001,7 @@ def bootstrap_backprojection_kernel[
     if active >= active_count:
         return
     var slice = Int(rebind[Scalar[DType.uint32]](active_slices[active]))
-    var scale = rebind[Scalar[DEVICE_DTYPE]](slice_gradient[slice])
+    var scale = rebind[Scalar[DType.float64]](slice_gradient[slice])
     var metadata = rebind[Scalar[DType.uint64]](slice_metadata[slice])
     var field = Int(metadata >> 32)
     var point_base = Int(
@@ -1081,9 +1037,9 @@ def metric_partial_reduction_kernel[
     PointLayout: TensorLayout,
     PartialLayout: TensorLayout,
 ](
-    voxel_results: TileTensor[DEVICE_DTYPE, ResultLayout, MutAnyOrigin],
-    gradient: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
-    partials: TileTensor[DEVICE_DTYPE, PartialLayout, MutAnyOrigin],
+    voxel_results: TileTensor[DType.float64, ResultLayout, MutAnyOrigin],
+    gradient: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
+    partials: TileTensor[DType.float64, PartialLayout, MutAnyOrigin],
     voxel_count: Int,
     point_count: Int,
 ):
@@ -1093,35 +1049,35 @@ def metric_partial_reduction_kernel[
     var thread = thread_idx.x
     var block = global_idx.x // REDUCTION_BLOCK_SIZE
     var index = block * REDUCTION_BLOCK_SIZE * 2 + thread
-    var chi2: Scalar[DEVICE_DTYPE] = 0.0
-    var weighted: Scalar[DEVICE_DTYPE] = 0.0
-    var norm2: Scalar[DEVICE_DTYPE] = 0.0
+    var chi2: Scalar[DType.float64] = 0.0
+    var weighted: Scalar[DType.float64] = 0.0
+    var norm2: Scalar[DType.float64] = 0.0
     if index < voxel_count:
-        chi2 = rebind[Scalar[DEVICE_DTYPE]](voxel_results[index * 4 + 2])
-        weighted = rebind[Scalar[DEVICE_DTYPE]](voxel_results[index * 4 + 3])
+        chi2 = rebind[Scalar[DType.float64]](voxel_results[index * 4 + 2])
+        weighted = rebind[Scalar[DType.float64]](voxel_results[index * 4 + 3])
     if index < point_count:
-        var value = rebind[Scalar[DEVICE_DTYPE]](gradient[index])
+        var value = rebind[Scalar[DType.float64]](gradient[index])
         norm2 = value * value
     var next = index + REDUCTION_BLOCK_SIZE
     if next < voxel_count:
-        chi2 += rebind[Scalar[DEVICE_DTYPE]](voxel_results[next * 4 + 2])
-        weighted += rebind[Scalar[DEVICE_DTYPE]](voxel_results[next * 4 + 3])
+        chi2 += rebind[Scalar[DType.float64]](voxel_results[next * 4 + 2])
+        weighted += rebind[Scalar[DType.float64]](voxel_results[next * 4 + 3])
     if next < point_count:
-        var value = rebind[Scalar[DEVICE_DTYPE]](gradient[next])
+        var value = rebind[Scalar[DType.float64]](gradient[next])
         norm2 += value * value
     var chi_shared = stack_allocation[
         REDUCTION_BLOCK_SIZE,
-        Scalar[DEVICE_DTYPE],
+        Scalar[DType.float64],
         address_space=AddressSpace.SHARED,
     ]()
     var weighted_shared = stack_allocation[
         REDUCTION_BLOCK_SIZE,
-        Scalar[DEVICE_DTYPE],
+        Scalar[DType.float64],
         address_space=AddressSpace.SHARED,
     ]()
     var norm_shared = stack_allocation[
         REDUCTION_BLOCK_SIZE,
-        Scalar[DEVICE_DTYPE],
+        Scalar[DType.float64],
         address_space=AddressSpace.SHARED,
     ]()
     chi_shared[thread] = chi2
@@ -1157,7 +1113,7 @@ def exact_step_terms_kernel[
     TermLayout: TensorLayout,
 ](
     field_point_offsets: TileTensor[DType.uint64, FieldLayout, MutAnyOrigin],
-    voxel_data: TileTensor[DEVICE_DTYPE, VoxelDataLayout, MutAnyOrigin],
+    voxel_data: TileTensor[DType.float64, VoxelDataLayout, MutAnyOrigin],
     scenario_slice_offsets: TileTensor[
         DType.uint64, ScenarioLayout, MutAnyOrigin
     ],
@@ -1177,16 +1133,16 @@ def exact_step_terms_kernel[
     coefficient_points: TileTensor[
         DType.uint16, CoefficientPointLayout, MutAnyOrigin
     ],
-    coefficients: TileTensor[DEVICE_DTYPE, CoefficientLayout, MutAnyOrigin],
-    direction: TileTensor[DEVICE_DTYPE, PointLayout, MutAnyOrigin],
-    slice_factors: TileTensor[DEVICE_DTYPE, FactorLayout, MutAnyOrigin],
-    voxel_results: TileTensor[DEVICE_DTYPE, ResultLayout, MutAnyOrigin],
+    coefficients: TileTensor[DType.float64, CoefficientLayout, MutAnyOrigin],
+    direction: TileTensor[DType.float64, PointLayout, MutAnyOrigin],
+    slice_factors: TileTensor[DType.float64, FactorLayout, MutAnyOrigin],
+    voxel_results: TileTensor[DType.float64, ResultLayout, MutAnyOrigin],
     scenario_indices: TileTensor[DType.int32, IndexLayout, MutAnyOrigin],
-    terms: TileTensor[DEVICE_DTYPE, TermLayout, MutAnyOrigin],
+    terms: TileTensor[DType.float64, TermLayout, MutAnyOrigin],
     voxel_count: Int,
     scenarios_per_voxel: Int,
-    flags: UInt32,
-    fractions: Scalar[DEVICE_DTYPE],
+    include_dmax: UInt32,
+    fractions: Scalar[DType.float64],
 ):
     comptime assert field_point_offsets.flat_rank == 1
     comptime assert voxel_data.flat_rank == 1
@@ -1206,7 +1162,7 @@ def exact_step_terms_kernel[
     if voxel >= voxel_count:
         return
     var data = voxel * 13
-    var prescribed = rebind[Scalar[DEVICE_DTYPE]](voxel_data[data])
+    var prescribed = rebind[Scalar[DType.float64]](voxel_data[data])
     var term = voxel * 2
     if prescribed == 0.0:
         if lane == 0:
@@ -1216,16 +1172,16 @@ def exact_step_terms_kernel[
     var prescribed_abs = prescribed
     if prescribed_abs < 0.0:
         prescribed_abs = -prescribed_abs
-    var dose_weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[data + 1])
-    var divisor = rebind[Scalar[DEVICE_DTYPE]](voxel_data[data + 2])
-    var maximum_weight = rebind[Scalar[DEVICE_DTYPE]](voxel_data[data + 3])
+    var dose_weight = rebind[Scalar[DType.float64]](voxel_data[data + 1])
+    var divisor = rebind[Scalar[DType.float64]](voxel_data[data + 2])
+    var maximum_weight = rebind[Scalar[DType.float64]](voxel_data[data + 3])
     var index = voxel * 2
     var min_scenario = Int(rebind[Scalar[DType.int32]](scenario_indices[index]))
     var max_scenario = Int(
         rebind[Scalar[DType.int32]](scenario_indices[index + 1])
     )
-    var rmin: Scalar[DEVICE_DTYPE] = 0.0
-    var rmax: Scalar[DEVICE_DTYPE] = 0.0
+    var rmin: Scalar[DType.float64] = 0.0
+    var rmax: Scalar[DType.float64] = 0.0
     for selection in range(2):
         var selected = min_scenario
         if selection == 1:
@@ -1237,7 +1193,7 @@ def exact_step_terms_kernel[
         var count = Int(
             rebind[Scalar[DType.uint32]](scenario_slice_counts[scenario])
         )
-        var response: Scalar[DEVICE_DTYPE] = 0.0
+        var response: Scalar[DType.float64] = 0.0
         for local_slice in range(count):
             var slice = offset + local_slice
             var metadata = rebind[Scalar[DType.uint64]](slice_metadata[slice])
@@ -1249,7 +1205,7 @@ def exact_step_terms_kernel[
                 rebind[Scalar[DType.uint64]](slice_offsets[slice])
             )
             var coefficient_count = Int(metadata & UInt64(0xFFFFFFFF))
-            var dot: Scalar[DEVICE_DTYPE] = 0.0
+            var dot: Scalar[DType.float64] = 0.0
             for entry in range(lane, coefficient_count, SPARSE_GROUP_SIZE):
                 var coefficient = coefficient_offset + entry
                 var local_point = _coefficient_point(
@@ -1272,11 +1228,11 @@ def exact_step_terms_kernel[
                     ),
                     local_point,
                     coefficient,
-                ) * rebind[Scalar[DEVICE_DTYPE]](direction[point])
+                ) * rebind[Scalar[DType.float64]](direction[point])
             dot = warp_sum(dot)
             if lane == 0:
-                response += dot * Scalar[DEVICE_DTYPE](
-                    rebind[Scalar[DEVICE_DTYPE]](slice_factors[slice * 5])
+                response += dot * rebind[Scalar[DType.float64]](
+                    slice_factors[slice * 5]
                 )
         response *= DEVICE_MEV_TO_GY * fractions
         if selection == 0:
@@ -1286,12 +1242,12 @@ def exact_step_terms_kernel[
     if lane != 0:
         return
     var dose_result = voxel * 4
-    var residual = prescribed_abs - rebind[Scalar[DEVICE_DTYPE]](
+    var residual = prescribed_abs - rebind[Scalar[DType.float64]](
         voxel_results[dose_result]
     )
     var response = rmin
     if prescribed < 0.0:
-        residual = prescribed_abs - rebind[Scalar[DEVICE_DTYPE]](
+        residual = prescribed_abs - rebind[Scalar[DType.float64]](
             voxel_results[dose_result + 1]
         )
         response = rmax
@@ -1300,10 +1256,8 @@ def exact_step_terms_kernel[
     var weighted_response = response * dose_weight / divisor
     var numerator = residual * dose_weight / divisor * weighted_response
     var denominator = weighted_response * weighted_response
-    if (flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX) != UInt32(
-        0
-    ) and prescribed > 0.0:
-        residual = prescribed_abs - rebind[Scalar[DEVICE_DTYPE]](
+    if include_dmax != UInt32(0) and prescribed > 0.0:
+        residual = prescribed_abs - rebind[Scalar[DType.float64]](
             voxel_results[dose_result + 1]
         )
         weighted_response = rmax * maximum_weight / divisor
@@ -1324,7 +1278,8 @@ struct DeviceWorkspace(Movable):
     var voxel_scenario_count: Int
     var metric_partial_count: Int
     var active_slice_capacity: Int
-    var flags: UInt32
+    var biological: UInt32
+    var include_dmax: UInt32
     var overdose_weight: Float64
     var fractions: Float64
     var field_offsets: DeviceBuffer[DType.uint64]
@@ -1332,9 +1287,9 @@ struct DeviceWorkspace(Movable):
     var slice_offsets: DeviceBuffer[DType.uint64]
     var matrix_slice_indices: DeviceBuffer[DType.uint32]
     var coefficient_point_owner: DeviceBuffer[DType.uint16]
-    var coefficient_owner: DeviceBuffer[DEVICE_DTYPE]
+    var coefficient_owner: DeviceBuffer[DType.float64]
     var coefficient_points: UnsafePointer[Scalar[DType.uint16], MutAnyOrigin]
-    var coefficients: UnsafePointer[Scalar[DEVICE_DTYPE], MutAnyOrigin]
+    var coefficients: UnsafePointer[Scalar[DType.float64], MutAnyOrigin]
     var procedural_matrix: Bool
     var matrix_energy_slices: UnsafePointer[MatrixEnergySlice, MutAnyOrigin]
     var matrix_points: UnsafePointer[MatrixPoint, MutAnyOrigin]
@@ -1342,23 +1297,23 @@ struct DeviceWorkspace(Movable):
     var matrix_slice_groups: UnsafePointer[UInt32, MutAnyOrigin]
     var matrix_slice_energy: UnsafePointer[UInt32, MutAnyOrigin]
     var matrix_slice_values: UnsafePointer[Float64, MutAnyOrigin]
-    var particles: DeviceBuffer[DEVICE_DTYPE]
+    var particles: DeviceBuffer[DType.float64]
     var point_active: DeviceBuffer[DType.uint8]
-    var slice_dot_output: DeviceBuffer[DEVICE_DTYPE]
+    var slice_dot_output: DeviceBuffer[DType.float64]
     var scenario_slice_offsets: DeviceBuffer[DType.uint64]
     var scenario_slice_counts: DeviceBuffer[DType.uint32]
-    var scenario_state: DeviceBuffer[DEVICE_DTYPE]
-    var slice_factors: DeviceBuffer[DEVICE_DTYPE]
-    var scenario_moments: DeviceBuffer[DEVICE_DTYPE]
-    var voxel_data: DeviceBuffer[DEVICE_DTYPE]
-    var scenario_bio: DeviceBuffer[DEVICE_DTYPE]
-    var voxel_results: DeviceBuffer[DEVICE_DTYPE]
+    var scenario_state: DeviceBuffer[DType.float64]
+    var slice_factors: DeviceBuffer[DType.float64]
+    var scenario_moments: DeviceBuffer[DType.float64]
+    var voxel_data: DeviceBuffer[DType.float64]
+    var scenario_bio: DeviceBuffer[DType.float64]
+    var voxel_results: DeviceBuffer[DType.float64]
     var scenario_indices: DeviceBuffer[DType.int32]
     var active_slice_count: DeviceBuffer[DType.uint32]
     var active_slices: DeviceBuffer[DType.uint32]
-    var gradient: DeviceBuffer[DEVICE_DTYPE]
-    var exact_step_terms: DeviceBuffer[DEVICE_DTYPE]
-    var metric_partials: DeviceBuffer[DEVICE_DTYPE]
+    var gradient: DeviceBuffer[DType.float64]
+    var exact_step_terms: DeviceBuffer[DType.float64]
+    var metric_partials: DeviceBuffer[DType.float64]
 
     def __init__(out self, problem: OptimizationProblem) raises:
         self = DeviceWorkspace(
@@ -1455,10 +1410,6 @@ struct DeviceWorkspace(Movable):
         ):
             raise Error("invalid device voxel shard")
         if external_coefficient_count > 0:
-            comptime if DEVICE_MIXED32:
-                raise Error(
-                    "external matrix storage requires reference precision"
-                )
             var matrix = matrix_storage.bitcast[DeviceMatrix]()
             self.context = DeviceContext(copy=matrix[].context)
         else:
@@ -1497,13 +1448,13 @@ struct DeviceWorkspace(Movable):
         self.scenarios_per_voxel = Int(problem.scenario_count)
         self.voxel_scenario_count = scenario_count
         var coefficient_point_device: DeviceBuffer[DType.uint16]
-        var coefficient_device: DeviceBuffer[DEVICE_DTYPE]
+        var coefficient_device: DeviceBuffer[DType.float64]
         if external_coefficient_count > 0:
             coefficient_point_device = self.context.enqueue_create_buffer[
                 DType.uint16
             ](1)
             coefficient_device = self.context.enqueue_create_buffer[
-                DEVICE_DTYPE
+                DType.float64
             ](1)
         else:
             coefficient_point_device = _copy_list_range_to_device[DType.uint16](
@@ -1541,10 +1492,9 @@ struct DeviceWorkspace(Movable):
                     maximum_slices = count
             var passes = 1
             if (
-                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
-            ) != UInt32(0) and problem.voxels[
-                voxel_offset + voxel
-            ].prescribed_dose > 0.0:
+                problem.settings.include_dmax
+                and problem.voxels[voxel_offset + voxel].prescribed_dose > 0.0
+            ):
                 passes = 2
             active_bound += passes * maximum_slices
         self.active_slice_capacity = active_bound
@@ -1552,7 +1502,12 @@ struct DeviceWorkspace(Movable):
             self.active_slice_capacity = self.slice_count
         if self.active_slice_capacity == 0:
             self.active_slice_capacity = 1
-        self.flags = problem.settings.flags
+        self.biological = UInt32(1) if problem.settings.biological else UInt32(
+            0
+        )
+        self.include_dmax = UInt32(
+            1
+        ) if problem.settings.include_dmax else UInt32(0)
         self.overdose_weight = problem.settings.overdose_weight
         self.fractions = problem.settings.fractions
         var field_layout = row_major(Idx(self.field_slice_count))
@@ -1581,12 +1536,12 @@ struct DeviceWorkspace(Movable):
             DType.uint32
         ](self.voxel_scenario_count)
         var scenario_state_host = self.context.enqueue_create_host_buffer[
-            DEVICE_DTYPE
+            DType.float64
         ](self.voxel_scenario_count * 4)
         var slice_factor_host = self.context.enqueue_create_host_buffer[
-            DEVICE_DTYPE
+            DType.float64
         ](self.slice_count * 5)
-        var voxel_host = self.context.enqueue_create_host_buffer[DEVICE_DTYPE](
+        var voxel_host = self.context.enqueue_create_host_buffer[DType.float64](
             self.voxel_count * 13
         )
         var active_host = self.context.enqueue_create_host_buffer[DType.uint8](
@@ -1720,14 +1675,11 @@ struct DeviceWorkspace(Movable):
         if external_coefficient_count > 0:
             var matrix = matrix_storage.bitcast[DeviceMatrix]()
             self.coefficient_points = matrix[].point_indices_device.unsafe_ptr()
-            comptime if not DEVICE_MIXED32:
-                self.coefficients = (
-                    matrix[]
-                    .coefficients_device.unsafe_ptr()
-                    .bitcast[Scalar[DEVICE_DTYPE]]()
-                )
-            else:
-                self.coefficients = self.coefficient_owner.unsafe_ptr()
+            self.coefficients = (
+                matrix[]
+                .coefficients_device.unsafe_ptr()
+                .bitcast[Scalar[DType.float64]]()
+            )
         else:
             self.coefficient_points = self.coefficient_point_owner.unsafe_ptr()
             self.coefficients = self.coefficient_owner.unsafe_ptr()
@@ -1767,14 +1719,14 @@ struct DeviceWorkspace(Movable):
                 self.matrix_slice_values = (
                     matrix_view[].slice_values_device.unsafe_ptr()
                 )
-        self.particles = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.particles = self.context.enqueue_create_buffer[DType.float64](
             self.point_count
         )
         self.point_active = self.context.enqueue_create_buffer[DType.uint8](
             self.point_count
         )
         self.slice_dot_output = self.context.enqueue_create_buffer[
-            DEVICE_DTYPE
+            DType.float64
         ](self.slice_count)
         self.scenario_slice_offsets = self.context.enqueue_create_buffer[
             DType.uint64
@@ -1782,22 +1734,22 @@ struct DeviceWorkspace(Movable):
         self.scenario_slice_counts = self.context.enqueue_create_buffer[
             DType.uint32
         ](self.voxel_scenario_count)
-        self.scenario_state = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.scenario_state = self.context.enqueue_create_buffer[DType.float64](
             self.voxel_scenario_count * 4
         )
-        self.slice_factors = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.slice_factors = self.context.enqueue_create_buffer[DType.float64](
             self.slice_count * 5
         )
         self.scenario_moments = self.context.enqueue_create_buffer[
-            DEVICE_DTYPE
+            DType.float64
         ](self.voxel_scenario_count * 5)
-        self.voxel_data = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.voxel_data = self.context.enqueue_create_buffer[DType.float64](
             self.voxel_count * 13
         )
-        self.scenario_bio = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.scenario_bio = self.context.enqueue_create_buffer[DType.float64](
             self.voxel_scenario_count * 4
         )
-        self.voxel_results = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.voxel_results = self.context.enqueue_create_buffer[DType.float64](
             self.voxel_count * 4
         )
         self.scenario_indices = self.context.enqueue_create_buffer[DType.int32](
@@ -1809,15 +1761,15 @@ struct DeviceWorkspace(Movable):
         self.active_slices = self.context.enqueue_create_buffer[DType.uint32](
             self.active_slice_capacity
         )
-        self.gradient = self.context.enqueue_create_buffer[DEVICE_DTYPE](
+        self.gradient = self.context.enqueue_create_buffer[DType.float64](
             self.point_count
         )
         self.exact_step_terms = self.context.enqueue_create_buffer[
-            DEVICE_DTYPE
+            DType.float64
         ](self.voxel_count * 2)
-        self.metric_partials = self.context.enqueue_create_buffer[DEVICE_DTYPE](
-            self.metric_partial_count * 3
-        )
+        self.metric_partials = self.context.enqueue_create_buffer[
+            DType.float64
+        ](self.metric_partial_count * 3)
         self.context.enqueue_copy(self.field_offsets, field_host)
         self.context.enqueue_copy(self.slice_metadata, slice_metadata_host)
         self.context.enqueue_copy(self.slice_offsets, slice_offset_host)
@@ -1844,12 +1796,12 @@ struct DeviceWorkspace(Movable):
             raise Error("device particle vector length mismatch")
         var point_layout = row_major(Idx(self.point_count))
         var particle_host = self.context.enqueue_create_host_buffer[
-            DEVICE_DTYPE
+            DType.float64
         ](self.point_count)
         var particle_tensor = TileTensor(particle_host, point_layout)
         comptime assert particle_tensor.flat_rank == 1
         for i in range(self.point_count):
-            particle_tensor[i] = Scalar[DEVICE_DTYPE](particles[i])
+            particle_tensor[i] = Scalar[DType.float64](particles[i])
         self.context.enqueue_copy(self.particles, particle_host)
 
     def _enqueue_slice_dots(mut self, particles: List[Float64]) raises:
@@ -2106,8 +2058,8 @@ struct DeviceWorkspace(Movable):
             TileTensor(self.exact_step_terms, term_layout),
             self.voxel_count,
             self.scenarios_per_voxel,
-            self.flags,
-            Scalar[DEVICE_DTYPE](self.fractions),
+            self.include_dmax,
+            Scalar[DType.float64](self.fractions),
             grid_dim=(
                 self.voxel_count * SPARSE_GROUP_SIZE + DEVICE_BLOCK_SIZE - 1
             )
@@ -2175,7 +2127,7 @@ struct DeviceWorkspace(Movable):
 
     def enqueue_evaluation_front(mut self, particles: List[Float64]) raises:
         self._enqueue_scenario_moments(particles)
-        var biological = self.flags & OPTIMIZER_FLAG_BIOLOGICAL
+        var biological = self.biological
         var voxel_layout = row_major(Idx(self.voxel_count * 13))
         var moment_layout = row_major(Idx(self.voxel_scenario_count * 5))
         var bio_layout = row_major(Idx(self.voxel_scenario_count * 4))
@@ -2196,7 +2148,7 @@ struct DeviceWorkspace(Movable):
             TileTensor(self.scenario_indices, index_layout),
             self.voxel_count,
             self.scenarios_per_voxel,
-            self.flags,
+            self.include_dmax,
             biological,
             grid_dim=(self.voxel_count + DEVICE_BLOCK_SIZE - 1)
             // DEVICE_BLOCK_SIZE,
@@ -2231,8 +2183,8 @@ struct DeviceWorkspace(Movable):
             TileTensor(self.slice_dot_output, slice_layout),
             self.voxel_count,
             self.scenarios_per_voxel,
-            self.flags,
-            Scalar[DEVICE_DTYPE](self.overdose_weight),
+            self.include_dmax,
+            Scalar[DType.float64](self.overdose_weight),
             biological,
             grid_dim=(self.voxel_count + DEVICE_BLOCK_SIZE - 1)
             // DEVICE_BLOCK_SIZE,

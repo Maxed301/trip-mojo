@@ -181,15 +181,12 @@ static int TRPOptMojoRun(struct STRPOPT *opt,
       goto done;
    }
    gMojoFinalMinimumApplied = 0;
-   problem.flags = MOJO_OPTIMIZER_FLAG_INITIALIZE;
    device_bootstrap = MojoUsesDeviceMatrix() || device_count > 1;
-   if ( device_bootstrap ) problem.flags |= MOJO_OPTIMIZER_FLAG_DEVICE_BOOTSTRAP;
-   if ( opt->ulFlag & TRPOPT_BIO ) problem.flags |= MOJO_OPTIMIZER_FLAG_BIOLOGICAL;
-   if ( opt->ulFlag & TRPOPT_ROBUST_INCLUDE_DMAX )
-      problem.flags |= MOJO_OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX;
+   problem.biological = (opt->ulFlag & TRPOPT_BIO) != 0;
+   problem.include_dmax =
+      (opt->ulFlag & TRPOPT_ROBUST_INCLUDE_DMAX) != 0;
    problem.minimum_particle_policy = (opt->ulFlag & TRPOPT_COMPLEXMINPART) ?
       MOJO_MINIMUM_PARTICLE_COMPLEX_HOST_RNG : MOJO_MINIMUM_PARTICLE_SIMPLE;
-   problem.dose_algorithm = MOJO_DOSE_ALGORITHM_MSDB;
    problem.rng_seed = opt->sVXR.iSeed;
    if ( MojoCaptureRNG(&problem, rng_state, saved_rng) ) goto done;
    problem.field_count = (uint32_t) opt->nF;
@@ -298,6 +295,10 @@ static int TRPOptMojoRun(struct STRPOPT *opt,
             goto done;
          }
          problem.coefficient_count = matrix_entry_count;
+         matrix_storages[0] = matrix_storage;
+         matrix_entry_counts[0] = matrix_entry_count;
+         matrix_voxel_offsets[0] = 0;
+         matrix_voxel_counts[0] = problem.voxel_count;
       } else if ( MojoMatrixDirectViews(
                      (uint32_t) device_count, matrix_storages,
                      matrix_coefficients_by_device,
@@ -345,16 +346,10 @@ static int TRPOptMojoRun(struct STRPOPT *opt,
    }
 
    phase = omp_get_wtime();
-   if ( direct_matrix && device_count == 1 )
-      rc = trip_optimizer_create_problem_with_matrix(
-         &problem, matrix_storage, &storage, &arrays);
-   else if ( direct_matrix )
-      rc = trip_optimizer_create_problem_with_matrix_shards(
-         &problem, matrix_storages, matrix_entry_counts,
-         matrix_voxel_offsets, matrix_voxel_counts, (uint32_t) device_count,
-         &storage, &arrays);
-   else
-      rc = trip_optimizer_create_problem(&problem, &storage, &arrays);
+   rc = trip_optimizer_create_problem(
+      &problem, matrix_storages, matrix_entry_counts,
+      matrix_voxel_offsets, matrix_voxel_counts, (uint32_t) device_count,
+      &storage, &arrays);
    if ( rc ) goto done;
    if ( direct_matrix && device_count == 1 )
       MojoMatrixTransferDirectStorage(matrix_storage);
@@ -442,7 +437,6 @@ static int TRPOptMojoRun(struct STRPOPT *opt,
                scenario_out->slice_offset = slice;
                scenario_out->slice_count =
                   (uint32_t) (slice_offsets[state_index + 1] - slice);
-               scenario_out->reserved = 0;
                state_out->dose_minor = source->dDoseM;
                state_out->alpha_minor = source->dalpha;
                state_out->sqrt_beta_minor = source->dbeta;
@@ -510,18 +504,8 @@ static int TRPOptMojoRun(struct STRPOPT *opt,
    if ( output_particles == NULL ) goto done;
    fprintf(stderr, "<I> Mojo optimizer devices=%d\n", device_count);
    phase = omp_get_wtime();
-   if ( direct_matrix && device_count == 1 )
-      rc = trip_optimizer_optimize_matrix_problem(
-         storage, output_particles, point_count, &result);
-   else if ( direct_matrix )
-      rc = trip_optimizer_optimize_matrix_problem_shards(
-         storage, output_particles, point_count, &result);
-   else if ( device_count > 1 )
-      rc = trip_optimizer_optimize_problem_on_devices(
-         storage, output_particles, point_count, device_count, &result);
-   else
-      rc = trip_optimizer_optimize_problem_on_device(
-         storage, output_particles, point_count, &result);
+   rc = trip_optimizer_optimize_problem(
+      storage, output_particles, point_count, &result);
    fprintf(stderr, "<TIME> Mojo optimizer optimize: %.6f sec\n",
            omp_get_wtime() - phase);
    if ( rc ) goto done;
@@ -538,8 +522,7 @@ static int TRPOptMojoRun(struct STRPOPT *opt,
             }
    }
    opt->dChi2 = result.chi2;
-   gMojoFinalMinimumApplied =
-      (result.flags & MOJO_OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED) != 0;
+   gMojoFinalMinimumApplied = result.final_minimum_particles_applied != 0;
    fprintf(stderr,
            "<I> Mojo optimizer: iterations=%" PRIu64 " chi2=%.17g residual=%.17g "
            "deleted=%" PRIu64 " rng=%" PRIu64 " stop=%u\n",
@@ -557,14 +540,7 @@ done:
    free(slice_offsets);
    free(coefficient_offsets);
    free(output_particles);
-   if ( storage ) {
-      if ( direct_matrix && device_count == 1 )
-         trip_optimizer_destroy_problem_with_matrix(storage);
-      else if ( direct_matrix )
-         trip_optimizer_destroy_problem_with_matrix_shards(storage);
-      else
-         trip_optimizer_destroy_problem(storage);
-   }
+   if ( storage ) trip_optimizer_destroy_problem(storage);
    fprintf(stderr, "<TIME> Mojo optimizer bridge: %.6f sec\n",
            omp_get_wtime() - start);
    return rc;

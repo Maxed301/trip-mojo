@@ -95,7 +95,7 @@ but it must preserve the optimizer trajectory before replacing the exact path.
 ## Integration
 
 The cluster keeps one `trip_temp` checkout at commit `1fb423f`, patched once
-with the integration patches under `integration/trip_temp`. `build_h200.sh`
+with the integration patches under `integration/trip_temp`. `build.sh`
 updates the persistent Mojo library and linked TRiP executable. `submit.sh`
 runs an existing plan without copying sources or rebuilding.
 

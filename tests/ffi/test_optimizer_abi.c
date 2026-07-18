@@ -2,7 +2,6 @@
 #include "matrix_abi.h"
 
 #include <assert.h>
-#include <float.h>
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -20,15 +19,12 @@ _Static_assert(sizeof(MojoRawMatrixEnergy) == 40, "matrix raw energy ABI");
 _Static_assert(sizeof(MojoRawMatrixGroup) == 32, "matrix raw group ABI");
 _Static_assert(sizeof(MojoMatrixDepthDoseTable) == 8, "matrix DDD table ABI");
 _Static_assert(sizeof(MojoMatrixDepthDoseEntry) == 40, "matrix DDD entry ABI");
-_Static_assert(sizeof(MojoMatrixBuildInput) == 104, "matrix view ABI");
+_Static_assert(sizeof(MojoMatrixBuildInput) == 112, "matrix view ABI");
 _Static_assert(sizeof(MojoMatrixBuildResult) == 72, "matrix result ABI");
 
-static double matrix_reference_output[260];
-static MojoOptimizationResult matrix_reference_result;
-
-static void test_matrix_accelerator(int procedural) {
+static void test_matrix_accelerator(void) {
     MojoMatrixEnergySlice energies[2] = {
-        {0, 260, 0}, {0, 260, 0},
+        {0, 260}, {0, 260},
     };
     MojoMatrixPoint points[260];
     MojoMatrixGroup group = {
@@ -64,9 +60,6 @@ static void test_matrix_accelerator(int procedural) {
         .ddd_tables = &table,
         .ddd_entries = entries,
     };
-    if (procedural)
-        problem.flags = MOJO_MATRIX_FLAG_DEVICE_ONLY |
-                        MOJO_MATRIX_FLAG_FORCE_PROCEDURAL;
     MojoDeviceMatrix *storage = NULL;
     MojoMatrixBuildResult result;
     uint32_t expected_count = 0;
@@ -88,22 +81,20 @@ static void test_matrix_accelerator(int procedural) {
     assert(result.entry_count == 2 * expected_count);
     assert(result.slice_count == 2);
     assert(result.group_count == 1);
-    assert(!!(result.flags & MOJO_MATRIX_RESULT_PROCEDURAL) == !!procedural);
+    assert(result.procedural == 0);
     assert(result.group_entry_counts[0] == 2 * expected_count);
     assert(result.slice_entry_counts[0] == expected_count);
     assert(result.slice_entry_counts[1] == expected_count);
     assert(result.slice_dose[0] == 2.0);
     assert(result.slice_dose[1] == 2.0);
-    if (!procedural) {
-        for (uint32_t matrix_slice = 0; matrix_slice < 2; ++matrix_slice) {
-            uint32_t output = matrix_slice * expected_count;
-            for (uint32_t point = 0; point < 260; ++point) {
-                if (point % 7 == 0) continue;
-                assert(result.point_indices[output] == point);
-                assert(isfinite(result.coefficients[output]));
-                assert(result.coefficients[output] > 0.0);
-                ++output;
-            }
+    for (uint32_t matrix_slice = 0; matrix_slice < 2; ++matrix_slice) {
+        uint32_t output = matrix_slice * expected_count;
+        for (uint32_t point = 0; point < 260; ++point) {
+            if (point % 7 == 0) continue;
+            assert(result.point_indices[output] == point);
+            assert(isfinite(result.coefficients[output]));
+            assert(result.coefficients[output] > 0.0);
+            ++output;
         }
     }
     assert(trip_optimizer_release_matrix_build_buffers(storage) == 0);
@@ -120,7 +111,7 @@ static void test_matrix_accelerator(int procedural) {
             .overdose_tolerance = 0.05,
             .scenario_offset = 0,
         };
-        MojoRobustScenario scenario = {0, 2, 0};
+        MojoRobustScenario scenario = {0, 2};
         MojoScenarioState state = {0};
         MojoDoseMatrixSlice slices[2] = {
             {
@@ -143,9 +134,7 @@ static void test_matrix_accelerator(int procedural) {
             particles[point] = 1.0;
             active[point] = 1;
         }
-        optimizer.flags = MOJO_OPTIMIZER_FLAG_INITIALIZE | MOJO_OPTIMIZER_FLAG_DEVICE_BOOTSTRAP;
         optimizer.minimum_particle_policy = MOJO_MINIMUM_PARTICLE_DISABLED;
-        optimizer.dose_algorithm = MOJO_DOSE_ALGORITHM_MS;
         optimizer.field_count = 1;
         optimizer.scenario_count = 1;
         optimizer.max_iterations = 1;
@@ -162,8 +151,13 @@ static void test_matrix_accelerator(int procedural) {
 
         MojoProblemHandle *problem_storage = NULL;
         MojoProblemArrays arrays;
-        assert(trip_optimizer_create_problem_with_matrix(
-                   &optimizer, storage, &problem_storage, &arrays) == 0);
+        MojoDeviceMatrix *matrices[1] = {storage};
+        uint64_t matrix_counts[1] = {result.entry_count};
+        uint64_t voxel_offsets[1] = {0};
+        uint64_t voxel_counts[1] = {1};
+        assert(trip_optimizer_create_problem(
+                   &optimizer, matrices, matrix_counts, voxel_offsets,
+                   voxel_counts, 1, &problem_storage, &arrays) == 0);
         assert(problem_storage != NULL);
         memcpy(arrays.field_slices, &field_slice, sizeof(field_slice));
         memcpy(arrays.particles, particles, sizeof(particles));
@@ -177,33 +171,19 @@ static void test_matrix_accelerator(int procedural) {
 
         double output[260];
         MojoOptimizationResult optimizer_result;
-        assert(trip_optimizer_optimize_matrix_problem(
+        assert(trip_optimizer_optimize_problem(
                    problem_storage, output, 260, &optimizer_result) == 0);
         assert(optimizer_result.iterations == 1);
         assert(isfinite(optimizer_result.chi2));
         for (uint32_t point = 0; point < 260; ++point) {
             assert(isfinite(output[point]));
         }
-        if (!procedural) {
-            memcpy(matrix_reference_output, output, sizeof(output));
-            matrix_reference_result = optimizer_result;
-        } else {
-            assert(memcmp(matrix_reference_output, output, sizeof(output)) == 0);
-            assert(matrix_reference_result.iterations == optimizer_result.iterations);
-            assert(matrix_reference_result.chi2 == optimizer_result.chi2);
-            assert(matrix_reference_result.residual_percent ==
-                   optimizer_result.residual_percent);
-            assert(matrix_reference_result.stop_reason ==
-                   optimizer_result.stop_reason);
-        }
-        assert(trip_optimizer_destroy_problem_with_matrix(problem_storage) ==
-               0);
+        assert(trip_optimizer_destroy_problem(problem_storage) == 0);
     }
 }
 
 int main(void) {
-    test_matrix_accelerator(0);
-    test_matrix_accelerator(1);
+    test_matrix_accelerator();
     const double mev_to_gy = 1.602189e-8;
     MojoFieldSlice field_slice = {0, 0, 0, 2, 0, 0.0};
     double particles[2] = {100.0, 50.0};
@@ -216,7 +196,7 @@ int main(void) {
          .overdose_tolerance = 0.05, .scenario_offset = 2},
     };
     MojoRobustScenario scenarios[4] = {
-        {0, 1, 0}, {1, 1, 0}, {2, 1, 0}, {3, 1, 0},
+        {0, 1}, {1, 1}, {2, 1}, {3, 1},
     };
     MojoScenarioState states[4] = {{0}};
     MojoDoseMatrixSlice slices[4] = {
@@ -230,7 +210,6 @@ int main(void) {
     MojoOptimizationProblem problem;
     memset(&problem, 0, sizeof(problem));
     problem.minimum_particle_policy = MOJO_MINIMUM_PARTICLE_DISABLED;
-    problem.dose_algorithm = MOJO_DOSE_ALGORITHM_MS;
     problem.field_count = 1;
     problem.scenario_count = 2;
     problem.max_iterations = 7;
@@ -255,33 +234,6 @@ int main(void) {
     problem.coefficient_point_indices = indices;
     problem.coefficients = coefficients;
 
-    double output[2];
-    double gradient[2];
-    MojoEvaluationResult evaluation;
-    assert(trip_optimizer_evaluate_view(&problem, gradient, 1, &evaluation) == -2);
-    assert(trip_optimizer_evaluate_view(&problem, gradient, 2, &evaluation) == 0);
-    assert(isfinite(evaluation.chi2));
-    assert(evaluation.gradient_norm > 0.0);
-    problem.dose_algorithm = 99;
-    assert(trip_optimizer_evaluate_view(&problem, gradient, 2, &evaluation) == -1);
-    problem.dose_algorithm = MOJO_DOSE_ALGORITHM_MS;
-    MojoOptimizationResult result;
-    assert(trip_optimizer_optimize_view(&problem, output, 2, &result) == 0);
-    assert(result.iterations == 7);
-    assert(result.flags & MOJO_OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED);
-    assert(isfinite(result.chi2));
-    assert(isfinite(result.exact_step));
-    assert(output[0] != particles[0] || output[1] != particles[1]);
-    MojoOptimizationResult initialized_result;
-    problem.flags = MOJO_OPTIMIZER_FLAG_INITIALIZE;
-    problem.max_iterations = 1;
-    assert(trip_optimizer_optimize_view(&problem, output, 2, &initialized_result) == 0);
-    assert(initialized_result.iterations == 1);
-    assert(initialized_result.flags & MOJO_OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED);
-    problem.flags = 0;
-    problem.max_iterations = 7;
-    assert(trip_optimizer_optimize_view(&problem, output, 2, &result) == 0);
-
     MojoOptimizationProblem storage_template = problem;
     storage_template.field_slices = NULL;
     storage_template.rng_state = NULL;
@@ -297,8 +249,13 @@ int main(void) {
     storage_template.coefficients = NULL;
     MojoProblemHandle *storage = NULL;
     MojoProblemArrays arrays;
+    MojoDeviceMatrix *matrices[1] = {NULL};
+    uint64_t matrix_counts[1] = {0};
+    uint64_t voxel_offsets[1] = {0};
+    uint64_t voxel_counts[1] = {2};
     assert(trip_optimizer_create_problem(
-               &storage_template, &storage, &arrays) == 0);
+               &storage_template, matrices, matrix_counts, voxel_offsets,
+               voxel_counts, 1, &storage, &arrays) == 0);
     assert(storage != NULL);
     memcpy(arrays.field_slices, &field_slice, sizeof(field_slice));
     memcpy(arrays.particles, particles, sizeof(particles));
@@ -314,50 +271,32 @@ int main(void) {
     double storage_gradient[2];
     MojoEvaluationResult storage_evaluation;
     assert(trip_optimizer_evaluate_problem(
+               storage, storage_gradient, 1, &storage_evaluation) == -2);
+    assert(trip_optimizer_evaluate_problem(
                storage, storage_gradient, 2, &storage_evaluation) == 0);
-    assert(storage_evaluation.chi2 == evaluation.chi2);
-    assert(memcmp(storage_gradient, gradient, sizeof(gradient)) == 0);
+    assert(isfinite(storage_evaluation.chi2));
+    assert(storage_evaluation.gradient_norm > 0.0);
     double storage_output[2];
     MojoOptimizationResult storage_result;
     assert(trip_optimizer_optimize_problem(
                storage, storage_output, 1, &storage_result) == -2);
-    assert(trip_optimizer_optimize_problem(
-               storage, storage_output, 2, &storage_result) == 0);
-    assert(storage_result.iterations == result.iterations);
-    assert(storage_result.chi2 == result.chi2);
-    assert(memcmp(storage_output, output, sizeof(output)) == 0);
-
-    double accelerator_output[2];
-    MojoOptimizationResult accelerator_result;
-    int32_t accelerator_status = trip_optimizer_optimize_view_on_device(
-        &problem, accelerator_output, 2, &accelerator_result);
+    int32_t accelerator_status = trip_optimizer_optimize_problem(
+        storage, storage_output, 2, &storage_result);
 #ifdef OPTIMIZER_TEST_REQUIRE_ACCELERATOR
     assert(accelerator_status == 0);
 #else
     assert(accelerator_status == 0 || accelerator_status == -3);
 #endif
-    double storage_accelerator_output[2];
-    MojoOptimizationResult storage_accelerator_result;
-    int32_t storage_accelerator_status =
-        trip_optimizer_optimize_problem_on_device(
-            storage, storage_accelerator_output, 2,
-            &storage_accelerator_result);
-    assert(storage_accelerator_status == accelerator_status);
     if (accelerator_status == 0) {
-        double scale = fabs(result.chi2) > 1.0 ? fabs(result.chi2) : 1.0;
-        assert(accelerator_result.iterations == result.iterations);
-        assert(fabs(accelerator_result.chi2 - result.chi2) <=
-               scale * 8.0 * DBL_EPSILON);
+        assert(storage_result.iterations == 7);
+        assert(storage_result.final_minimum_particles_applied);
+        assert(isfinite(storage_result.chi2));
+        assert(isfinite(storage_result.exact_step));
         for (size_t i = 0; i < 2; ++i) {
-            assert(isfinite(accelerator_output[i]));
+            assert(isfinite(storage_output[i]));
         }
-        assert(accelerator_output[0] != particles[0] ||
-               accelerator_output[1] != particles[1]);
-        assert(storage_accelerator_result.iterations ==
-               accelerator_result.iterations);
-        assert(storage_accelerator_result.chi2 == accelerator_result.chi2);
-        assert(memcmp(storage_accelerator_output, accelerator_output,
-                      sizeof(accelerator_output)) == 0);
+        assert(storage_output[0] != particles[0] ||
+               storage_output[1] != particles[1]);
     }
     assert(trip_optimizer_destroy_problem(storage) == 0);
     return 0;

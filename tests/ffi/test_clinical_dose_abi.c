@@ -142,7 +142,6 @@ int main(void) {
     problem.hlut_y = hlut_y;
     problem.ddd_entries = ddd_entries;
 
-    problem.flags = CLINICAL_DOSE_BIOLOGICAL;
     problem.biology_model = CLINICAL_DOSE_BIOLOGY_LOW_DOSE;
     assert(trip_compute_clinical_dose(&problem, &output, 1) == 0);
     assert(fabs(output.absorbed_dose - fluence * 2.0) < 1.0e-12);

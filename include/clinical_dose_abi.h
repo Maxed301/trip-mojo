@@ -8,8 +8,6 @@ extern "C" {
 #endif
 
 enum {
-    CLINICAL_DOSE_BIOLOGICAL = 1u << 0,
-    CLINICAL_DOSE_DIVERGENT = 1u << 1,
     CLINICAL_DOSE_ALGORITHM_MS = 1,
     CLINICAL_DOSE_ALGORITHM_MSDB = 2,
     CLINICAL_DOSE_BIOLOGY_NONE = 0,
@@ -84,7 +82,6 @@ typedef struct {
 } ClinicalDoseOutput;
 
 typedef struct {
-    uint32_t flags;
     uint32_t grid_voxel_count, state_count, field_count;
     uint32_t energy_count, point_count;
     uint32_t ddd_table_count, ddd_entry_count;

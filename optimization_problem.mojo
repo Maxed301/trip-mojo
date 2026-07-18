@@ -13,10 +13,6 @@ from std.math import sqrt
 comptime MINIMUM_PARTICLE_DISABLED = UInt32(0)
 comptime MINIMUM_PARTICLE_SIMPLE = UInt32(1)
 comptime MINIMUM_PARTICLE_COMPLEX_HOST_RNG = UInt32(2)
-comptime OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX = UInt32(1)
-comptime OPTIMIZER_FLAG_BIOLOGICAL = UInt32(2)
-comptime OPTIMIZER_FLAG_INITIALIZE = UInt32(4)
-comptime OPTIMIZER_FLAG_DEVICE_BOOTSTRAP = UInt32(8)
 comptime MEV_TO_GY = 1.602189e-8
 comptime FLOAT64_EPSILON = 2.220446049250313e-16
 comptime PHYSICAL_CPU_THREADS = 12
@@ -50,7 +46,8 @@ struct MinimumParticlePolicy(Copyable, Movable):
 
 @fieldwise_init
 struct OptimizerSettings(Copyable, Movable):
-    var flags: UInt32
+    var biological: Bool
+    var include_dmax: Bool
     var max_iterations: UInt32
     var grace_iterations: UInt32
     var avoidance_voxel_count: UInt32
@@ -71,7 +68,8 @@ struct OptimizerSettings(Copyable, Movable):
     @staticmethod
     def reference_defaults() -> OptimizerSettings:
         return OptimizerSettings(
-            UInt32(0),
+            False,
+            False,
             UInt32(0),
             UInt32(0),
             UInt32(0),
@@ -279,14 +277,14 @@ struct OptimizationProblem(Copyable, Movable):
             ):
                 raise Error("voxel initial scenario index is out of bounds")
             if (
-                (self.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0)
+                self.settings.biological
                 and voxel.prescribed_dose != 0.0
                 and voxel.rbe_alpha == 0.0
                 and voxel.rbe_beta == 0.0
             ):
                 raise Error("biological voxel has zero RBE alpha and beta")
             if (
-                (self.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0)
+                self.settings.biological
                 and voxel.prescribed_dose != 0.0
                 and voxel.rbe_slope_max == 0.0
             ):
@@ -468,9 +466,7 @@ def evaluate_physical_objective_validated(
         weighted += (weight * voxel.prescribed_dose) * (
             weight * voxel.prescribed_dose
         )
-        if (
-            problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
-        ) != UInt32(0) and voxel.prescribed_dose > 0.0:
+        if problem.settings.include_dmax and voxel.prescribed_dose > 0.0:
             var max_weight = voxel.maximum_dose_weight / voxel.dose_divisor
             var max_residual = prescribed - dmax
             chi2 += (max_residual * max_weight) * (max_residual * max_weight)
@@ -506,9 +502,7 @@ def evaluate_physical_objective_validated(
                 False,
                 output_base,
             )
-            if (
-                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
-            ) != UInt32(0) and voxel.prescribed_dose > 0.0:
+            if problem.settings.include_dmax and voxel.prescribed_dose > 0.0:
                 scatter_packed_physical_gradient(
                     problem,
                     particles,

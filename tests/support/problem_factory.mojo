@@ -1,6 +1,6 @@
 """Explicit adapters from convenient host models to OptimizationProblem."""
 
-from robust_objective import (
+from tests.support.reference_objective import (
     BiologicalScenarioSet,
     BioLQParams,
     PhysicalScenarioSet,
@@ -17,7 +17,6 @@ from optimization_problem import (
     DoseMatrixSlice,
     RobustScenario,
     OptimizationVoxel,
-    OPTIMIZER_FLAG_BIOLOGICAL,
     MEV_TO_GY,
 )
 
@@ -383,7 +382,7 @@ def pack_biological_problem_with_fields(
             )
             states.append(ScenarioState(0.0, 0.0, 0.0, 0.0))
     var packed_settings = settings.copy()
-    packed_settings.flags |= OPTIMIZER_FLAG_BIOLOGICAL
+    packed_settings.biological = True
     var rng_state = List[UInt32]()
     var problem = OptimizationProblem(
         packed_settings^,

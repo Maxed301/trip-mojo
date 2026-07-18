@@ -8,7 +8,6 @@ from optimization_problem import (
     OptimizationProblem,
     DoseMatrixSlice,
     OptimizationVoxel,
-    OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX,
     FLOAT64_EPSILON,
     MEV_TO_GY,
     abs_f64,
@@ -175,9 +174,7 @@ def evaluate_biological_objective_validated(
         weighted += (dose_weight * voxel.prescribed_dose) * (
             dose_weight * voxel.prescribed_dose
         )
-        if (
-            problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
-        ) != UInt32(0) and voxel.prescribed_dose > 0.0:
+        if problem.settings.include_dmax and voxel.prescribed_dose > 0.0:
             var max_weight = voxel.maximum_dose_weight / voxel.dose_divisor
             var max_residual = prescribed - dmax
             chi2 += (max_residual * max_weight) * (max_residual * max_weight)
@@ -212,9 +209,7 @@ def evaluate_biological_objective_validated(
                 False,
                 output_base,
             )
-            if (
-                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
-            ) != UInt32(0) and voxel.prescribed_dose > 0.0:
+            if problem.settings.include_dmax and voxel.prescribed_dose > 0.0:
                 var maximum = Int(max_scenario[voxel_index])
                 scatter_packed_biological_gradient(
                     problem,
@@ -474,33 +469,6 @@ def packed_let_residual(
     return residual * let_weight * prescribed_dose / prescribed_let
 
 
-def scatter_slice(
-    problem: OptimizationProblem,
-    particles: List[Float64],
-    packed_slice: DoseMatrixSlice,
-    scale: Float64,
-    mut output: List[Float64],
-    output_base: Int = 0,
-):
-    var field_slice = problem.field_slices[
-        Int(packed_slice.field_slice_index)
-    ].copy()
-    for local_entry in range(Int(packed_slice.coefficient_count)):
-        var coefficient_index = (
-            Int(packed_slice.coefficient_offset) + local_entry
-        )
-        var point_index = Int(field_slice.point_offset) + Int(
-            problem.coefficient_point_indices[coefficient_index]
-        )
-        if (
-            problem.point_active[point_index] != UInt8(0)
-            and particles[point_index] != 0.0
-        ):
-            output[output_base + point_index] += scale * Float64(
-                problem.coefficients[coefficient_index]
-            )
-
-
 def compute_physical_exact_step(
     problem: OptimizationProblem,
     evaluation: ObjectiveEvaluation,
@@ -621,9 +589,7 @@ def compute_exact_step(
                 * weighted_response
             )
             denominator += weighted_response * weighted_response
-            if (
-                problem.settings.flags & OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
-            ) != UInt32(0) and voxel.prescribed_dose > 0.0:
+            if problem.settings.include_dmax and voxel.prescribed_dose > 0.0:
                 residual = (
                     abs_f64(voxel.prescribed_dose) - dose_max[voxel_index]
                 )

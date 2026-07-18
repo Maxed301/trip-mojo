@@ -7,7 +7,7 @@ from minimum_particles import (
     update_with_minimum_particle_policy,
 )
 from optimization_problem import MINIMUM_PARTICLE_COMPLEX_HOST_RNG
-from test_optimization_problem import build_problem
+from tests.test_optimization_problem import build_problem
 
 
 def test_reference_rng_sequence() raises:

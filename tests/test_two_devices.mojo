@@ -8,10 +8,9 @@ from optimizer import (
     optimize_on_devices,
 )
 from optimization_problem import (
-    OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX,
     evaluate_physical_objective,
 )
-from test_optimization_problem import build_flattened_4d_robust_problem
+from tests.test_optimization_problem import build_flattened_4d_robust_problem
 
 
 def assert_close(actual: Float64, expected: Float64) raises:
@@ -39,7 +38,7 @@ def main() raises:
             rejected = True
         assert_true(rejected)
 
-        problem.settings.flags |= OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX
+        problem.settings.include_dmax = True
         for voxel in range(shards[0].voxel_count):
             problem.voxels[voxel].prescribed_dose = -abs(
                 problem.voxels[voxel].prescribed_dose

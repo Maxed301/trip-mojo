@@ -430,8 +430,7 @@ static int MojoMatrixImport(
    arena->coefficients = (double *) result->coefficients;
    arena->point_indices = (uint16_t *) result->point_indices;
    arena->storage = storage;
-   arena->procedural =
-      (result->flags & MOJO_MATRIX_RESULT_PROCEDURAL) != 0;
+   arena->procedural = result->procedural != 0;
    arena->device_id = build->device_id;
    arena->voxel_offset = build->voxel_offset;
    arena->voxel_count = build->voxel_count;
@@ -559,9 +558,8 @@ static int MojoMatrixFlush(struct MojoMatrixBuild *build) {
    if ( build->group_count == 0 ) return 0;
    memset(&problem, 0, sizeof(problem));
    memset(&result, 0, sizeof(result));
-   if ( MojoUsesDeviceMatrix() )
-      problem.flags |= MOJO_MATRIX_FLAG_DEVICE_ONLY |
-         (build->device_id << MOJO_MATRIX_DEVICE_ID_SHIFT);
+   problem.device_only = MojoUsesDeviceMatrix();
+   problem.device_id = build->device_id;
    problem.group_count = build->group_count;
    problem.energy_slice_count = build->energy_count;
    problem.maximum_group_slices = build->maximum_group_slices;

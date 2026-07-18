@@ -27,9 +27,6 @@ from optimization_problem import (
     DoseMatrixSlice,
     RobustScenario,
     OptimizationVoxel,
-    OPTIMIZER_FLAG_BIOLOGICAL,
-    OPTIMIZER_FLAG_DEVICE_BOOTSTRAP,
-    OPTIMIZER_FLAG_INITIALIZE,
     evaluate_physical_objective_validated,
 )
 from reference_math import reference_exp
@@ -92,7 +89,7 @@ def evaluate_objective(
 def evaluate_objective_validated(
     problem: OptimizationProblem, particles: List[Float64]
 ) raises -> IterationEvaluation:
-    if (problem.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0):
+    if problem.settings.biological:
         var evaluation = evaluate_biological_objective_validated(
             problem, particles
         )
@@ -171,9 +168,11 @@ struct CpuEvaluator(ObjectiveEvaluator):
 
 struct DeviceEvaluator(Movable, ObjectiveEvaluator):
     var workspace: DeviceWorkspace
+    var device_bootstrap: Bool
 
     def __init__(out self, problem: OptimizationProblem) raises:
         self.workspace = DeviceWorkspace(problem)
+        self.device_bootstrap = False
 
     def __init__[
         origin: Origin
@@ -186,6 +185,7 @@ struct DeviceEvaluator(Movable, ObjectiveEvaluator):
         self.workspace = DeviceWorkspace(
             problem, matrix_storage, coefficient_count
         )
+        self.device_bootstrap = True
 
     def evaluate(
         mut self, problem: OptimizationProblem, particles: List[Float64]
@@ -206,9 +206,7 @@ struct DeviceEvaluator(Movable, ObjectiveEvaluator):
     def initial_direction(
         mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
-        if (problem.settings.flags & OPTIMIZER_FLAG_DEVICE_BOOTSTRAP) != UInt32(
-            0
-        ):
+        if self.device_bootstrap:
             return self.workspace.zero_gradient_direction()
         return initial_direction(problem, gradient)
 
@@ -337,10 +335,8 @@ struct MultiDeviceEvaluator(Movable, ObjectiveEvaluator):
     def initial_direction(
         mut self, problem: OptimizationProblem, gradient: List[Float64]
     ) raises -> List[Float64]:
-        if (problem.settings.flags & OPTIMIZER_FLAG_DEVICE_BOOTSTRAP) == UInt32(
-            0
-        ):
-            return initial_direction(problem, gradient)
+        _ = problem
+        _ = gradient
         var direction = self.workspaces[0][].zero_gradient_direction()
         for device in range(1, len(self.workspaces)):
             var partial = self.workspaces[device][].zero_gradient_direction()
@@ -382,12 +378,6 @@ def optimize_on_device(
 ) raises -> OptimizationResult:
     var evaluator = DeviceEvaluator(problem)
     return run_optimization(problem, evaluator)
-
-
-def optimize_on_two_devices(
-    mut problem: OptimizationProblem,
-) raises -> OptimizationResult:
-    return optimize_on_devices(problem, 2)
 
 
 def optimize_on_devices(
@@ -479,9 +469,7 @@ def run_optimization[
         problem.scenario_states = List[ScenarioState]()
         problem.slices = List[DoseMatrixSlice]()
         print("<I> optimizer released-host-bytes=", released_bytes, sep="")
-    var active_gradient_norm = evaluation.gradient_norm
-    if (problem.settings.flags & OPTIMIZER_FLAG_INITIALIZE) != UInt32(0):
-        active_gradient_norm = vector_norm(direction)
+    var active_gradient_norm = vector_norm(direction)
     var rng = make_host_rng(problem)
     var total_iteration = problem.settings.total_iterations
     var iterations = UInt32(0)
@@ -492,17 +480,10 @@ def run_optimization[
     var last_factor = 0.0
     var last_exact_step = 0.0
     var stop_reason = STOP_MAX_ITERATIONS
-    var initialize = (
-        problem.settings.flags & OPTIMIZER_FLAG_INITIALIZE
-    ) != UInt32(0)
-    var update_count = Int(problem.settings.max_iterations)
-    if initialize:
-        update_count += 1
+    var update_count = Int(problem.settings.max_iterations) + 1
     for update_index in range(update_count):
-        var initialization_update = initialize and update_index == 0
-        var iteration = update_index
-        if initialize and update_index > 0:
-            iteration -= 1
+        var initialization_update = update_index == 0
+        var iteration = update_index - 1
         var exact_step = evaluator.exact_step(problem, evaluation, direction)
         last_exact_step = exact_step
         var active_count = count_active_points(problem)
@@ -519,9 +500,10 @@ def run_optimization[
         total_iteration += UInt32(1)
 
         var factor = default_step_factor(problem)
-        if (problem.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(
-            0
-        ) and problem.settings.configured_step_factor <= 0.0:
+        if (
+            problem.settings.biological
+            and problem.settings.configured_step_factor <= 0.0
+        ):
             var interval = problem.settings.step_factor_iterations
             if interval == UInt32(0):
                 interval = problem.settings.max_iterations
@@ -660,9 +642,7 @@ def initial_direction(
     for value in problem.initial_direction:
         if value != 0.0:
             return problem.initial_direction.copy()
-    if (problem.settings.flags & OPTIMIZER_FLAG_INITIALIZE) != UInt32(0):
-        return packed_zero_gradient_direction(problem)
-    return gradient.copy()
+    return packed_zero_gradient_direction(problem)
 
 
 def vector_norm(values: List[Float64]) -> Float64:
@@ -675,7 +655,7 @@ def vector_norm(values: List[Float64]) -> Float64:
 def default_step_factor(problem: OptimizationProblem) -> Float64:
     if problem.settings.configured_step_factor > 0.0:
         return problem.settings.configured_step_factor
-    if (problem.settings.flags & OPTIMIZER_FLAG_BIOLOGICAL) != UInt32(0):
+    if problem.settings.biological:
         return 1.0
     return 0.5
 

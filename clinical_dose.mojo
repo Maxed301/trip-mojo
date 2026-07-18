@@ -7,8 +7,6 @@ from std.sys.info import size_of
 from reference_math import reference_exp
 
 
-comptime CLINICAL_DOSE_BIOLOGICAL = UInt32(1)
-comptime CLINICAL_DOSE_DIVERGENT = UInt32(2)
 comptime CLINICAL_DOSE_ALGORITHM_MS = UInt32(1)
 comptime CLINICAL_DOSE_ALGORITHM_MSDB = UInt32(2)
 comptime CLINICAL_DOSE_BIOLOGY_NONE = UInt32(0)
@@ -171,7 +169,6 @@ struct ClinicalDoseOutput(Copyable, Movable):
 
 @fieldwise_init
 struct ClinicalDoseProblem(Copyable, Movable):
-    var flags: UInt32
     var grid_voxel_count: UInt32
     var state_count: UInt32
     var field_count: UInt32
@@ -278,19 +275,11 @@ def validate_clinical_dose(view: ClinicalDoseProblem) raises:
     ):
         raise Error("clinical dose grid dimensions must be positive")
     if (
-        view.flags & ~(CLINICAL_DOSE_BIOLOGICAL | CLINICAL_DOSE_DIVERGENT)
-    ) != UInt32(0):
-        raise Error("clinical dose flags contain unsupported bits")
-    if (
         view.algorithm != CLINICAL_DOSE_ALGORITHM_MS
         and view.algorithm != CLINICAL_DOSE_ALGORITHM_MSDB
     ):
         raise Error("clinical dose supports only ms and msdb")
-    if (view.algorithm == CLINICAL_DOSE_ALGORITHM_MSDB) != (
-        (view.flags & CLINICAL_DOSE_DIVERGENT) != UInt32(0)
-    ):
-        raise Error("clinical dose algorithm and divergent flag disagree")
-    var biological = (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0)
+    var biological = view.biology_model == CLINICAL_DOSE_BIOLOGY_LOW_DOSE
     if biological and view.biology_model != CLINICAL_DOSE_BIOLOGY_LOW_DOSE:
         raise Error("biological clinical dose  requires low-dose biology")
     if not biological and view.biology_model != CLINICAL_DOSE_BIOLOGY_NONE:
@@ -349,7 +338,7 @@ def validate_clinical_dose(view: ClinicalDoseProblem) raises:
                 raise Error("clinical dose state field range is out of bounds")
     if four_d and next_field != UInt64(view.field_count):
         raise Error("clinical dose states do not cover all fields")
-    if (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0):
+    if biological:
         if view.voi_count == UInt32(0) or view.bio_table_count == UInt32(0):
             raise Error(
                 "biological clinical dose requires VOI and biology tables"
@@ -380,9 +369,9 @@ def validate_clinical_dose(view: ClinicalDoseProblem) raises:
                 raise Error(
                     "clinical dose point has invalid support or particles"
                 )
-        if (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0) and UInt64(
-            energy.bio_table_offset
-        ) + UInt64(view.voi_count) > UInt64(view.bio_table_count):
+        if biological and UInt64(energy.bio_table_offset) + UInt64(
+            view.voi_count
+        ) > UInt64(view.bio_table_count):
             raise Error("clinical dose biology table range is out of bounds")
     for table_index in range(Int(view.ddd_table_count)):
         var table = view.ddd_tables[table_index].copy()
@@ -390,7 +379,7 @@ def validate_clinical_dose(view: ClinicalDoseProblem) raises:
             view.ddd_entry_count
         ):
             raise Error("clinical dose DDD table range is out of bounds")
-    if (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0):
+    if biological:
         for table_index in range(Int(view.bio_table_count)):
             var table = view.bio_tables[table_index].copy()
             if UInt64(table.entry_offset) + UInt64(table.entry_count) > UInt64(
@@ -747,7 +736,7 @@ def compute_clinical_dose_voxel[
     pz: Float64,
 ) -> ClinicalDoseOutput:
     var output = ClinicalDoseOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    var biological = (view.flags & CLINICAL_DOSE_BIOLOGICAL) != UInt32(0)
+    var biological = view.biology_model == CLINICAL_DOSE_BIOLOGY_LOW_DOSE
     var voi = -1
     if biological:
         voi = Int(view.voxel_voi[voxel])
@@ -801,7 +790,7 @@ def compute_clinical_dose_voxel[
         var field = view.fields[Int(grid_field.field_index)].copy()
         var divergence_x = 0.0
         var divergence_y = 0.0
-        if (view.flags & CLINICAL_DOSE_DIVERGENT) != UInt32(0):
+        if view.algorithm == CLINICAL_DOSE_ALGORITHM_MSDB:
             if field.scanner_x != 0.0:
                 divergence_x = gz / Float64(field.scanner_x)
             if field.scanner_y != 0.0:

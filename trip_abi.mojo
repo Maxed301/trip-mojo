@@ -1,6 +1,5 @@
 """Thin C ABI for the packed optimizer."""
 
-from std.algorithm import parallelize
 from std.memory import OpaquePointer, UnsafePointer, alloc
 from std.sys import has_accelerator
 
@@ -20,7 +19,6 @@ from matrix_builder import (
 from optimizer import (
     OptimizationResult,
     evaluate_objective,
-    optimize_on_cpu,
     optimize_on_device,
     optimize_on_devices,
     optimize_with_matrix_shards,
@@ -39,10 +37,6 @@ from optimization_problem import (
 
 
 comptime HAS_ACCELERATOR_ABI = has_accelerator()
-comptime OPTIMIZER_ABI_COPY_THREADS = 12
-comptime DOSE_ALGORITHM_MS = UInt32(1)
-comptime DOSE_ALGORITHM_MSDB = UInt32(2)
-comptime OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED = UInt32(1)
 
 
 @export("trip_optimizer_build_device_matrix", ABI="C")
@@ -138,7 +132,6 @@ struct ABIVoxel(Copyable, Movable):
 struct ABIVoxelScenario(Copyable, Movable):
     var slice_offset: UInt64
     var slice_count: UInt32
-    var reserved: UInt32
 
 
 @fieldwise_init
@@ -164,9 +157,9 @@ struct ABIScenarioState(Copyable, Movable):
 
 @fieldwise_init
 struct ABIProblemView(Copyable, Movable):
-    var flags: UInt32
+    var biological: UInt32
+    var include_dmax: UInt32
     var minimum_particle_policy: UInt32
-    var dose_algorithm: UInt32
     var rng_seed: UInt64
     var rng_front: UInt32
     var rng_rear: UInt32
@@ -228,22 +221,11 @@ struct ABIWritableArrays(Copyable, Movable):
 @fieldwise_init
 struct ABIProblemStorage(Movable):
     var problem: OptimizationProblem
-
-
-@fieldwise_init
-struct ABIMatrixProblemStorage(Movable):
-    var problem: OptimizationProblem
-    var matrix_storage: OpaquePointer[MutExternalOrigin]
-    var coefficient_count: Int
-
-
-@fieldwise_init
-struct ABIMultiMatrixProblemStorage(Movable):
-    var problem: OptimizationProblem
     var matrix_storages: List[OpaquePointer[MutExternalOrigin]]
     var coefficient_counts: List[Int]
     var voxel_offsets: List[Int]
     var voxel_counts: List[Int]
+    var device_count: Int
 
 
 @fieldwise_init
@@ -258,7 +240,7 @@ struct ABIResult(Copyable, Movable):
     var minimum_particle_deleted: UInt64
     var random_draws: UInt64
     var stop_reason: UInt32
-    var flags: UInt32
+    var final_minimum_particles_applied: UInt32
 
 
 @fieldwise_init
@@ -291,58 +273,6 @@ def writable_arrays(
 @export("trip_optimizer_create_problem", ABI="C")
 def trip_optimizer_create_problem(
     template_pointer: OpaquePointer[MutExternalOrigin],
-    storage_out: UnsafePointer[
-        OpaquePointer[MutExternalOrigin], MutExternalOrigin
-    ],
-    arrays_out: UnsafePointer[ABIWritableArrays, MutExternalOrigin],
-) -> Int32:
-    try:
-        var view = template_pointer.bitcast[ABIProblemView]()[].copy()
-        validate_abi_contract(view)
-        var problem = allocate_problem(view)
-        var storage = alloc[ABIProblemStorage](1)
-        storage.init_pointee_move(ABIProblemStorage(problem^))
-        arrays_out[] = writable_arrays(storage[].problem)
-        storage_out[] = storage.bitcast[NoneType]()
-        return Int32(0)
-    except error:
-        print("optimizer storage create ABI error:", error)
-        return Int32(-1)
-
-
-@export("trip_optimizer_create_problem_with_matrix", ABI="C")
-def trip_optimizer_create_problem_with_matrix(
-    template_pointer: OpaquePointer[MutExternalOrigin],
-    matrix_pointer: OpaquePointer[MutExternalOrigin],
-    storage_out: UnsafePointer[
-        OpaquePointer[MutExternalOrigin], MutExternalOrigin
-    ],
-    arrays_out: UnsafePointer[ABIWritableArrays, MutExternalOrigin],
-) -> Int32:
-    try:
-        var view = template_pointer.bitcast[ABIProblemView]()[].copy()
-        validate_abi_contract(view)
-        var matrix = matrix_pointer.bitcast[DeviceMatrix]()
-        if UInt64(matrix[].entry_count) != view.coefficient_count:
-            raise Error("matrix and optimizer coefficient counts differ")
-        var problem = allocate_problem(view, allocate_coefficients=False)
-        var storage = alloc[ABIMatrixProblemStorage](1)
-        storage.init_pointee_move(
-            ABIMatrixProblemStorage(
-                problem^, matrix_pointer, matrix[].entry_count
-            )
-        )
-        arrays_out[] = writable_arrays(storage[].problem)
-        storage_out[] = storage.bitcast[NoneType]()
-        return Int32(0)
-    except error:
-        print("dose matrix problem storage create ABI error:", error)
-        return Int32(-1)
-
-
-@export("trip_optimizer_create_problem_with_matrix_shards", ABI="C")
-def trip_optimizer_create_problem_with_matrix_shards(
-    template_pointer: OpaquePointer[MutExternalOrigin],
     matrix_pointers: UnsafePointer[
         OpaquePointer[MutExternalOrigin], MutExternalOrigin
     ],
@@ -356,53 +286,61 @@ def trip_optimizer_create_problem_with_matrix_shards(
     arrays_out: UnsafePointer[ABIWritableArrays, MutExternalOrigin],
 ) -> Int32:
     try:
-        if device_count < UInt32(2) or device_count > UInt32(3):
+        if device_count < UInt32(1) or device_count > UInt32(3):
             return Int32(-2)
         var view = template_pointer.bitcast[ABIProblemView]()[].copy()
-        validate_abi_contract(view)
         var matrices = List[OpaquePointer[MutExternalOrigin]]()
         var counts = List[Int]()
         var voxel_offsets = List[Int]()
         var voxel_counts = List[Int]()
-        var total_entries = UInt64(0)
-        var expected_voxel = UInt64(0)
-        for device in range(Int(device_count)):
-            var matrix_pointer = matrix_pointers[device]
-            var matrix = matrix_pointer.bitcast[DeviceMatrix]()
-            var count = matrix_entry_counts[device]
-            if (
-                count == UInt64(0)
-                or UInt64(matrix[].entry_count) != count
-                or voxel_offsets_pointer[device] != expected_voxel
-                or voxel_counts_pointer[device] == UInt64(0)
-            ):
-                raise Error("invalid external dose matrix shard")
-            matrices.append(matrix_pointer)
-            counts.append(Int(count))
-            voxel_offsets.append(Int(expected_voxel))
-            voxel_counts.append(Int(voxel_counts_pointer[device]))
-            total_entries += count
-            expected_voxel += voxel_counts_pointer[device]
-        if total_entries != view.coefficient_count:
-            raise Error("matrix and optimizer coefficient counts differ")
-        if expected_voxel != view.voxel_count:
-            raise Error("matrix shards do not cover optimizer voxels")
-        var problem = allocate_problem(view, allocate_coefficients=False)
-        var storage = alloc[ABIMultiMatrixProblemStorage](1)
+        var direct_matrix = matrix_entry_counts[0] != UInt64(0)
+        if direct_matrix:
+            var total_entries = UInt64(0)
+            var expected_voxel = UInt64(0)
+            for device in range(Int(device_count)):
+                var matrix_pointer = matrix_pointers[device]
+                var matrix = matrix_pointer.bitcast[DeviceMatrix]()
+                var count = matrix_entry_counts[device]
+                if (
+                    count == UInt64(0)
+                    or UInt64(matrix[].entry_count) != count
+                    or voxel_offsets_pointer[device] != expected_voxel
+                    or voxel_counts_pointer[device] == UInt64(0)
+                ):
+                    raise Error("invalid external dose matrix shard")
+                matrices.append(matrix_pointer)
+                counts.append(Int(count))
+                voxel_offsets.append(Int(expected_voxel))
+                voxel_counts.append(Int(voxel_counts_pointer[device]))
+                total_entries += count
+                expected_voxel += voxel_counts_pointer[device]
+            if total_entries != view.coefficient_count:
+                raise Error("matrix and optimizer coefficient counts differ")
+            if expected_voxel != view.voxel_count:
+                raise Error("matrix shards do not cover optimizer voxels")
+        else:
+            for device in range(Int(device_count)):
+                if matrix_entry_counts[device] != UInt64(0):
+                    raise Error("partial external matrix set is invalid")
+        var problem = allocate_problem(
+            view, allocate_coefficients=not direct_matrix
+        )
+        var storage = alloc[ABIProblemStorage](1)
         storage.init_pointee_move(
-            ABIMultiMatrixProblemStorage(
+            ABIProblemStorage(
                 problem^,
                 matrices^,
                 counts^,
                 voxel_offsets^,
                 voxel_counts^,
+                Int(device_count),
             )
         )
         arrays_out[] = writable_arrays(storage[].problem)
         storage_out[] = storage.bitcast[NoneType]()
         return Int32(0)
     except error:
-        print("optimizer multi-matrix problem storage create ABI error:", error)
+        print("optimizer storage create ABI error:", error)
         return Int32(-1)
 
 
@@ -411,27 +349,6 @@ def trip_optimizer_destroy_problem(
     storage_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
     var storage = storage_pointer.bitcast[ABIProblemStorage]()
-    storage.destroy_pointee()
-    storage.free()
-    return Int32(0)
-
-
-@export("trip_optimizer_destroy_problem_with_matrix", ABI="C")
-def trip_optimizer_destroy_problem_with_matrix(
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    var storage = storage_pointer.bitcast[ABIMatrixProblemStorage]()
-    _ = destroy_device_matrix_from_abi(storage[].matrix_storage)
-    storage.destroy_pointee()
-    storage.free()
-    return Int32(0)
-
-
-@export("trip_optimizer_destroy_problem_with_matrix_shards", ABI="C")
-def trip_optimizer_destroy_problem_with_matrix_shards(
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    var storage = storage_pointer.bitcast[ABIMultiMatrixProblemStorage]()
     for matrix in storage[].matrix_storages:
         _ = destroy_device_matrix_from_abi(matrix)
     storage.destroy_pointee()
@@ -446,134 +363,40 @@ def trip_optimizer_optimize_problem(
     particles_out_count: UInt64,
     result_pointer: OpaquePointer[MutExternalOrigin],
 ) -> Int32:
-    return optimize_owned_problem[False](
-        storage_pointer,
-        particles_out,
-        particles_out_count,
-        result_pointer,
-    )
-
-
-@export("trip_optimizer_optimize_problem_on_device", ABI="C")
-def trip_optimizer_optimize_problem_on_device(
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    comptime if HAS_ACCELERATOR_ABI:
-        return optimize_owned_problem[True](
-            storage_pointer,
-            particles_out,
-            particles_out_count,
-            result_pointer,
-        )
-    else:
-        return Int32(-3)
-
-
-@export("trip_optimizer_optimize_problem_on_devices", ABI="C")
-def trip_optimizer_optimize_problem_on_devices(
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    device_count: UInt32,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
     comptime if HAS_ACCELERATOR_ABI:
         try:
-            if device_count < UInt32(2) or device_count > UInt32(3):
-                return Int32(-2)
             var storage = storage_pointer.bitcast[ABIProblemStorage]()
             if particles_out_count != UInt64(len(storage[].problem.particles)):
                 return Int32(-2)
-            var result = optimize_on_devices(
-                storage[].problem, Int(device_count)
-            )
+            var result: OptimizationResult
+            if len(storage[].matrix_storages) == 1:
+                result = optimize_with_matrix(
+                    storage[].problem,
+                    storage[].matrix_storages[0],
+                    storage[].coefficient_counts[0],
+                )
+            elif len(storage[].matrix_storages) > 1:
+                result = optimize_with_matrix_shards(
+                    storage[].problem,
+                    storage[].matrix_storages,
+                    storage[].coefficient_counts,
+                    storage[].voxel_offsets,
+                    storage[].voxel_counts,
+                )
+            elif storage[].device_count == 1:
+                result = optimize_on_device(storage[].problem)
+            else:
+                result = optimize_on_devices(
+                    storage[].problem, storage[].device_count
+                )
             return write_optimization_result(
                 result, particles_out, result_pointer
             )
         except error:
-            print("optimizer multi-device optimize ABI error:", error)
+            print("optimizer optimize ABI error:", error)
             return Int32(-1)
     else:
         return Int32(-3)
-
-
-@export("trip_optimizer_optimize_matrix_problem", ABI="C")
-def trip_optimizer_optimize_matrix_problem(
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    comptime if HAS_ACCELERATOR_ABI:
-        try:
-            var storage = storage_pointer.bitcast[ABIMatrixProblemStorage]()
-            if particles_out_count != UInt64(len(storage[].problem.particles)):
-                return Int32(-2)
-            var result = optimize_with_matrix(
-                storage[].problem,
-                storage[].matrix_storage,
-                storage[].coefficient_count,
-            )
-            return write_optimization_result(
-                result, particles_out, result_pointer
-            )
-        except error:
-            print("dose matrix problem optimize ABI error:", error)
-            return Int32(-1)
-    else:
-        return Int32(-3)
-
-
-@export("trip_optimizer_optimize_matrix_problem_shards", ABI="C")
-def trip_optimizer_optimize_matrix_problem_shards(
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    comptime if HAS_ACCELERATOR_ABI:
-        try:
-            var storage = storage_pointer.bitcast[
-                ABIMultiMatrixProblemStorage
-            ]()
-            if particles_out_count != UInt64(len(storage[].problem.particles)):
-                return Int32(-2)
-            var result = optimize_with_matrix_shards(
-                storage[].problem,
-                storage[].matrix_storages,
-                storage[].coefficient_counts,
-                storage[].voxel_offsets,
-                storage[].voxel_counts,
-            )
-            return write_optimization_result(
-                result, particles_out, result_pointer
-            )
-        except error:
-            print("optimizer multi-matrix optimize ABI error:", error)
-            return Int32(-1)
-    else:
-        return Int32(-3)
-
-
-@export("trip_optimizer_evaluate_view", ABI="C")
-def trip_optimizer_evaluate_view(
-    problem_pointer: OpaquePointer[MutExternalOrigin],
-    gradient_out: UnsafePointer[Float64, MutExternalOrigin],
-    gradient_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    try:
-        var view = problem_pointer.bitcast[ABIProblemView]()[].copy()
-        if gradient_out_count != view.point_count:
-            return Int32(-2)
-        var problem = copy_problem(view)
-        return evaluate_problem(problem, gradient_out, result_pointer)
-    except error:
-        print("optimizer evaluate ABI error:", error)
-        return Int32(-1)
 
 
 @export("trip_optimizer_evaluate_problem", ABI="C")
@@ -611,95 +434,6 @@ def evaluate_problem(
     return Int32(0)
 
 
-@export("trip_optimizer_optimize_view", ABI="C")
-def trip_optimizer_optimize_view(
-    problem_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    return optimize_view[False](
-        problem_pointer,
-        particles_out,
-        particles_out_count,
-        result_pointer,
-    )
-
-
-@export("trip_optimizer_optimize_view_on_device", ABI="C")
-def trip_optimizer_optimize_view_on_device(
-    problem_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    comptime if HAS_ACCELERATOR_ABI:
-        return optimize_view[True](
-            problem_pointer,
-            particles_out,
-            particles_out_count,
-            result_pointer,
-        )
-    else:
-        return Int32(-3)
-
-
-def optimize_view[
-    use_device: Bool
-](
-    problem_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    try:
-        var view = problem_pointer.bitcast[ABIProblemView]()[].copy()
-        if particles_out_count != view.point_count:
-            return Int32(-2)
-        var problem = copy_problem(view)
-        return run_selected_backend[use_device](
-            problem, particles_out, result_pointer
-        )
-    except error:
-        print("optimizer optimize ABI error:", error)
-        return Int32(-1)
-
-
-def optimize_owned_problem[
-    use_device: Bool
-](
-    storage_pointer: OpaquePointer[MutExternalOrigin],
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    particles_out_count: UInt64,
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) -> Int32:
-    try:
-        var storage = storage_pointer.bitcast[ABIProblemStorage]()
-        if particles_out_count != UInt64(len(storage[].problem.particles)):
-            return Int32(-2)
-        return run_selected_backend[use_device](
-            storage[].problem, particles_out, result_pointer
-        )
-    except error:
-        print("optimizer storage optimize ABI error:", error)
-        return Int32(-1)
-
-
-def run_selected_backend[
-    use_device: Bool
-](
-    mut problem: OptimizationProblem,
-    particles_out: UnsafePointer[Float64, MutExternalOrigin],
-    result_pointer: OpaquePointer[MutExternalOrigin],
-) raises -> Int32:
-    var result: OptimizationResult
-    comptime if use_device:
-        result = optimize_on_device(problem)
-    else:
-        result = optimize_on_cpu(problem)
-    return write_optimization_result(result, particles_out, result_pointer)
-
-
 def write_optimization_result(
     result: OptimizationResult,
     particles_out: UnsafePointer[Float64, MutExternalOrigin],
@@ -719,22 +453,15 @@ def write_optimization_result(
         result.minimum_particle_deleted,
         result.random_draws,
         result.stop_reason,
-        OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED,
+        UInt32(1),
     )
     return Int32(0)
 
 
-def validate_abi_contract(view: ABIProblemView) raises:
-    if (
-        view.dose_algorithm != DOSE_ALGORITHM_MS
-        and view.dose_algorithm != DOSE_ALGORITHM_MSDB
-    ):
-        raise Error("optimizer ABI accepts only ms and msdb sparse matrices")
-
-
 def settings_from_view(view: ABIProblemView) -> OptimizerSettings:
     return OptimizerSettings(
-        view.flags,
+        view.biological != UInt32(0),
+        view.include_dmax != UInt32(0),
         view.max_iterations,
         view.grace_iterations,
         view.avoidance_voxel_count,
@@ -807,49 +534,3 @@ def allocate_problem(
         indices^,
         coefficients^,
     )
-
-
-def copy_problem(view: ABIProblemView) raises -> OptimizationProblem:
-    validate_abi_contract(view)
-    var problem = allocate_problem(view)
-    var field_slices = problem.field_slices.unsafe_ptr().bitcast[
-        ABIFieldSlice
-    ]()
-    var voxels = problem.voxels.unsafe_ptr().bitcast[ABIVoxel]()
-    var voxel_scenarios = problem.voxel_scenarios.unsafe_ptr().bitcast[
-        ABIVoxelScenario
-    ]()
-    var states = problem.scenario_states.unsafe_ptr().bitcast[
-        ABIScenarioState
-    ]()
-    var slices = problem.slices.unsafe_ptr().bitcast[ABISlice]()
-    for i in range(Int(view.field_slice_count)):
-        field_slices[i] = view.field_slices[i].copy()
-    for i in range(Int(view.rng_state_count)):
-        problem.host_rng_state[i] = view.rng_state[i]
-    for i in range(Int(view.point_count)):
-        problem.particles[i] = view.particles[i]
-        problem.initial_direction[i] = view.initial_direction[i]
-        problem.initial_gradient[i] = view.initial_gradient[i]
-        problem.point_active[i] = view.point_active[i]
-    for i in range(Int(view.voxel_count)):
-        voxels[i] = view.voxels[i].copy()
-    for i in range(Int(view.voxel_scenario_count)):
-        voxel_scenarios[i] = view.voxel_scenarios[i].copy()
-        states[i] = view.scenario_states[i].copy()
-
-    @parameter
-    def copy_slice(i: Int):
-        slices[i] = view.slices[i].copy()
-
-    parallelize[copy_slice](Int(view.slice_count), OPTIMIZER_ABI_COPY_THREADS)
-
-    @parameter
-    def copy_coefficient(i: Int):
-        problem.coefficient_point_indices[i] = view.coefficient_point_indices[i]
-        problem.coefficients[i] = view.coefficients[i]
-
-    parallelize[copy_coefficient](
-        Int(view.coefficient_count), OPTIMIZER_ABI_COPY_THREADS
-    )
-    return problem^

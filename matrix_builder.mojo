@@ -10,15 +10,10 @@ from std.sys.info import size_of
 from std.time import perf_counter_ns
 
 
-comptime MATRIX_FLAG_DEVICE_ONLY = UInt32(1)
-comptime MATRIX_FLAG_FORCE_PROCEDURAL = UInt32(2)
-comptime MATRIX_DEVICE_ID_SHIFT = 8
-comptime MATRIX_DEVICE_ID_MASK = UInt32(0xFF00)
 comptime MATRIX_BLOCK_SIZE = 128
 comptime MATRIX_FILL_BLOCK_SIZE = 128
 comptime MATRIX_FILL_WARPS = MATRIX_FILL_BLOCK_SIZE // WARP_SIZE
 comptime MATRIX_MATERIALIZED_ENTRY_LIMIT = UInt64(10_000_000_000)
-comptime MATRIX_RESULT_PROCEDURAL = UInt32(1)
 comptime MATRIX_REDUCTION_GROUP_SIZE = 32
 comptime MATRIX_REDUCTION_GROUPS = (
     MATRIX_BLOCK_SIZE // MATRIX_REDUCTION_GROUP_SIZE
@@ -32,7 +27,6 @@ comptime MATRIX_4LN2 = 2.7728
 struct MatrixEnergySlice(Copyable, Movable):
     var point_offset: UInt64
     var point_count: UInt32
-    var reserved: UInt32
 
 
 @fieldwise_init
@@ -46,7 +40,6 @@ struct MatrixPoint(Copyable, Movable):
 struct MatrixGroup(Copyable, Movable):
     var slice_offset: UInt64
     var slice_count: UInt32
-    var reserved: UInt32
     var bev_x: Float64
     var bev_y: Float64
     var relative_cutoff: Float64
@@ -96,7 +89,8 @@ struct MatrixBuildInput(Copyable, Movable):
     var slice_count: UInt64
     var point_count: UInt64
     var ddd_table_count: UInt32
-    var flags: UInt32
+    var device_only: UInt32
+    var device_id: UInt32
     var ddd_entry_count: UInt64
     var energy_slices: UnsafePointer[MatrixEnergySlice, MutExternalOrigin]
     var points: UnsafePointer[MatrixPoint, MutExternalOrigin]
@@ -112,7 +106,7 @@ struct MatrixBuildResult(Copyable, Movable):
     var entry_count: UInt64
     var slice_count: UInt64
     var group_count: UInt32
-    var flags: UInt32
+    var procedural: UInt32
     var group_maximum: UnsafePointer[Float64, MutAnyOrigin]
     var group_entry_counts: UnsafePointer[UInt32, MutAnyOrigin]
     var slice_entry_counts: UnsafePointer[UInt32, MutAnyOrigin]
@@ -542,27 +536,19 @@ def _fill_kernel(
 
 
 def _validate_matrix_view(view: MatrixBuildInput) raises:
-    if view.flags & ~(
-        MATRIX_FLAG_DEVICE_ONLY
-        | MATRIX_FLAG_FORCE_PROCEDURAL
-        | MATRIX_DEVICE_ID_MASK
-    ) != UInt32(0):
-        raise Error("dose matrix flags are invalid")
+    if view.device_only > UInt32(1):
+        raise Error("dose matrix device-only value is invalid")
     if view.group_count == UInt32(0):
         raise Error("dose matrix requires at least one group")
     if view.maximum_group_slices == UInt32(0):
         raise Error("dose matrix maximum group slices must be nonzero")
     for index in range(Int(view.energy_slice_count)):
         var energy = view.energy_slices[index].copy()
-        if energy.reserved != UInt32(0):
-            raise Error("dose matrix energy reserved field must be zero")
         if energy.point_offset + UInt64(energy.point_count) > view.point_count:
             raise Error("dose matrix energy point range is invalid")
     for index in range(Int(view.group_count)):
         var group = view.groups[index].copy()
         var raw_group = view.raw_groups[index].copy()
-        if group.reserved != UInt32(0):
-            raise Error("dose matrix group reserved field must be zero")
         if group.slice_offset + UInt64(group.slice_count) > view.slice_count:
             raise Error("dose matrix group slice range is invalid")
         if group.slice_count > view.maximum_group_slices:
@@ -605,9 +591,7 @@ def build_device_matrix(
     var slice_count = Int(view.slice_count)
     var table_count = Int(view.ddd_table_count)
     var entry_count = Int(view.ddd_entry_count)
-    var device_id = Int(
-        (view.flags & MATRIX_DEVICE_ID_MASK) >> MATRIX_DEVICE_ID_SHIFT
-    )
+    var device_id = Int(view.device_id)
     var context = DeviceContext(device_id=device_id)
     var energy_device_bytes = _copy_bytes_to_device(
         context,
@@ -745,10 +729,9 @@ def build_device_matrix(
     var allocation_count = output_count
     if allocation_count == 0:
         allocation_count = 1
-    var device_only = (view.flags & MATRIX_FLAG_DEVICE_ONLY) != UInt32(0)
-    var procedural = device_only and (
-        total_entries > MATRIX_MATERIALIZED_ENTRY_LIMIT
-        or (view.flags & MATRIX_FLAG_FORCE_PROCEDURAL) != UInt32(0)
+    var device_only = view.device_only != UInt32(0)
+    var procedural = (
+        device_only and total_entries > MATRIX_MATERIALIZED_ENTRY_LIMIT
     )
     var point_indices_device = context.enqueue_create_buffer[DType.uint16](
         allocation_count
@@ -859,14 +842,11 @@ def build_device_matrix(
     if device_only:
         result_point_indices = storage[].point_indices_device.unsafe_ptr()
         result_coefficients = storage[].coefficients_device.unsafe_ptr()
-    var result_flags = UInt32(0)
-    if procedural:
-        result_flags = MATRIX_RESULT_PROCEDURAL
     result_out[] = MatrixBuildResult(
         total_entries,
         view.slice_count,
         view.group_count,
-        result_flags,
+        UInt32(1) if procedural else UInt32(0),
         storage[].group_maximum.unsafe_ptr(),
         storage[].group_entry_counts.unsafe_ptr(),
         storage[].slice_entry_counts.unsafe_ptr(),

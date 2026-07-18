@@ -1,8 +1,11 @@
 from std.testing import assert_equal, assert_raises, assert_true
 
 from cpu_backend import compute_physical_exact_step, packed_directional_dose
-from robust_objective import PhysicalScenarioSet, VoxelObjective
-from problem_packing import (
+from tests.support.reference_objective import (
+    PhysicalScenarioSet,
+    VoxelObjective,
+)
+from tests.support.problem_factory import (
     NativeFieldSlice,
     pack_physical_problem,
     pack_physical_problem_with_fields,
@@ -16,7 +19,7 @@ from optimization_problem import (
     evaluate_physical_objective,
     compute_forward_dose,
 )
-from sparse_optimizer import SparseDoseEntry, SparseDoseMatrix
+from tests.support.sparse_matrix import SparseDoseEntry, SparseDoseMatrix
 
 
 def assert_close(actual: Float64, expected: Float64, tolerance: Float64) raises:

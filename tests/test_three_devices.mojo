@@ -8,7 +8,7 @@ from optimizer import (
     optimize_on_devices,
 )
 from optimization_problem import evaluate_physical_objective
-from test_optimization_problem import build_flattened_4d_robust_problem
+from tests.test_optimization_problem import build_flattened_4d_robust_problem
 
 
 def assert_close(actual: Float64, expected: Float64) raises:

@@ -8,16 +8,9 @@ extern "C" {
 #endif
 
 enum {
-    MOJO_OPTIMIZER_FLAG_ROBUST_INCLUDE_DMAX = 1u << 0,
-    MOJO_OPTIMIZER_FLAG_BIOLOGICAL = 1u << 1,
-    MOJO_OPTIMIZER_FLAG_INITIALIZE = 1u << 2,
-    MOJO_OPTIMIZER_FLAG_DEVICE_BOOTSTRAP = 1u << 3,
     MOJO_MINIMUM_PARTICLE_DISABLED = 0,
     MOJO_MINIMUM_PARTICLE_SIMPLE = 1,
-    MOJO_MINIMUM_PARTICLE_COMPLEX_HOST_RNG = 2,
-    MOJO_DOSE_ALGORITHM_MS = 1,
-    MOJO_DOSE_ALGORITHM_MSDB = 2,
-    MOJO_OPTIMIZATION_RESULT_FINAL_MIN_PARTICLES_APPLIED = 1u << 0
+    MOJO_MINIMUM_PARTICLE_COMPLEX_HOST_RNG = 2
 };
 
 /* Field slices are grouped by contiguous field_index values starting at zero.
@@ -55,7 +48,6 @@ typedef struct {
 typedef struct {
     uint64_t slice_offset;
     uint32_t slice_count;
-    uint32_t reserved;
 } MojoRobustScenario;
 
 typedef struct {
@@ -78,9 +70,9 @@ typedef struct {
 } MojoScenarioState;
 
 typedef struct {
-    uint32_t flags;
+    uint32_t biological;
+    uint32_t include_dmax;
     uint32_t minimum_particle_policy;
-    uint32_t dose_algorithm;
     uint64_t rng_seed;
     uint32_t rng_front;
     uint32_t rng_rear;
@@ -155,7 +147,7 @@ typedef struct {
     uint64_t minimum_particle_deleted;
     uint64_t random_draws;
     uint32_t stop_reason;
-    uint32_t flags;
+    uint32_t final_minimum_particles_applied;
 } MojoOptimizationResult;
 
 typedef struct {
@@ -166,19 +158,6 @@ typedef struct {
 } MojoEvaluationResult;
 
 int32_t trip_optimizer_create_problem(
-    const MojoOptimizationProblem *problem_template,
-    MojoProblemHandle **storage_out,
-    MojoProblemArrays *arrays_out
-);
-
-int32_t trip_optimizer_create_problem_with_matrix(
-    const MojoOptimizationProblem *problem_template,
-    struct MojoDeviceMatrix *matrix_storage,
-    MojoProblemHandle **storage_out,
-    MojoProblemArrays *arrays_out
-);
-
-int32_t trip_optimizer_create_problem_with_matrix_shards(
     const MojoOptimizationProblem *problem_template,
     struct MojoDeviceMatrix *const *matrix_storages,
     const uint64_t *matrix_entry_counts,
@@ -191,14 +170,6 @@ int32_t trip_optimizer_create_problem_with_matrix_shards(
 
 int32_t trip_optimizer_destroy_problem(MojoProblemHandle *storage);
 
-int32_t trip_optimizer_destroy_problem_with_matrix(
-    MojoProblemHandle *storage
-);
-
-int32_t trip_optimizer_destroy_problem_with_matrix_shards(
-    MojoProblemHandle *storage
-);
-
 int32_t trip_optimizer_evaluate_problem(
     MojoProblemHandle *storage,
     double *gradient_out,
@@ -208,59 +179,6 @@ int32_t trip_optimizer_evaluate_problem(
 
 int32_t trip_optimizer_optimize_problem(
     MojoProblemHandle *storage,
-    double *particles_out,
-    uint64_t particles_out_count,
-    MojoOptimizationResult *result_out
-);
-
-/* Returns -3 when the library was built without an available accelerator. */
-int32_t trip_optimizer_optimize_problem_on_device(
-    MojoProblemHandle *storage,
-    double *particles_out,
-    uint64_t particles_out_count,
-    MojoOptimizationResult *result_out
-);
-
-/*  accepts two or three devices and shards packed voxels. */
-int32_t trip_optimizer_optimize_problem_on_devices(
-    MojoProblemHandle *storage,
-    double *particles_out,
-    uint64_t particles_out_count,
-    uint32_t device_count,
-    MojoOptimizationResult *result_out
-);
-
-int32_t trip_optimizer_optimize_matrix_problem(
-    MojoProblemHandle *storage,
-    double *particles_out,
-    uint64_t particles_out_count,
-    MojoOptimizationResult *result_out
-);
-
-int32_t trip_optimizer_optimize_matrix_problem_shards(
-    MojoProblemHandle *storage,
-    double *particles_out,
-    uint64_t particles_out_count,
-    MojoOptimizationResult *result_out
-);
-
-int32_t trip_optimizer_evaluate_view(
-    const MojoOptimizationProblem *problem,
-    double *gradient_out,
-    uint64_t gradient_out_count,
-    MojoEvaluationResult *result_out
-);
-
-int32_t trip_optimizer_optimize_view(
-    const MojoOptimizationProblem *problem,
-    double *particles_out,
-    uint64_t particles_out_count,
-    MojoOptimizationResult *result_out
-);
-
-/* Returns -3 when the library was built without an available accelerator. */
-int32_t trip_optimizer_optimize_view_on_device(
-    const MojoOptimizationProblem *problem,
     double *particles_out,
     uint64_t particles_out_count,
     MojoOptimizationResult *result_out

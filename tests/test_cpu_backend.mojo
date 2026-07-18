@@ -4,7 +4,7 @@ from cpu_backend import (
     evaluate_biological_objective,
     compute_biological_exact_step,
 )
-from robust_objective import (
+from tests.support.reference_objective import (
     BiologicalMatrixEntry,
     BiologicalDoseMatrix,
     BiologicalScenarioSet,
@@ -13,7 +13,7 @@ from robust_objective import (
     evaluate_robust_biological,
 )
 from optimizer import optimize_on_cpu
-from problem_packing import (
+from tests.support.problem_factory import (
     NativeFieldSlice,
     pack_biological_problem,
     pack_biological_problem_with_fields,
